@@ -40,8 +40,8 @@ def extract_tunable_params(code: str) -> dict:
 
 
 CLAUDE_MODEL = "claude-opus-4-6"
-GPT_MODEL = "gpt-5.4-pro-max"
-GEMINI_MODEL = "gemini-3.1"
+GPT_MODEL = "gpt-5.4-pro"
+GEMINI_MODEL = "gemini-3.1-pro"
 
 
 def _build_context(problem_id: str) -> str:
@@ -181,9 +181,10 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     resp = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=128000,
-        thinking={"type": "enabled", "budget_tokens": 100000},
+        thinking={"type": "adaptive", "effort": "max"},
         system=system,
         messages=[{"role": "user", "content": user_msg}],
+        stream=False,
     )
     text = next(b.text for b in resp.content if b.type == "text")
     result = _parse_candidate(text)
@@ -199,12 +200,12 @@ def _generate_gpt(system: str, user_msg: str) -> dict:
         model=GPT_MODEL,
         instructions=system,
         input=user_msg,
-        max_output_tokens=100000,
-        reasoning={"effort": "high", "summary": "auto"},
+        max_output_tokens=128000,
+        reasoning={"effort": "xhigh", "summary": "auto"},
     )
     text = resp.output_text
     result = _parse_candidate(text)
-    result["model"] = "GPT 5.4 Pro Max"
+    result["model"] = "GPT 5.4 Pro"
     return result
 
 
@@ -217,7 +218,7 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
         contents=user_msg,
         config=genai.types.GenerateContentConfig(
             system_instruction=system,
-            thinking_config=genai.types.ThinkingConfig(thinking_budget=65536),
+            thinking_config=genai.types.ThinkingConfig(thinking_level="MAX"),
             max_output_tokens=65536,
         ),
     )
@@ -257,7 +258,7 @@ def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> di
         model=GPT_MODEL,
         instructions=system,
         input="\n".join(parts),
-        reasoning={"effort": "high", "summary": "auto"},
+        reasoning={"effort": "xhigh", "summary": "auto"},
     )
     choice = resp.output_text.strip().upper()
 
