@@ -180,8 +180,8 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     client = anthropic.Anthropic(api_key=get_api_key())
     resp = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=32000,
-        thinking={"type": "enabled", "budget_tokens": 20000},
+        max_tokens=128000,
+        thinking={"type": "enabled", "budget_tokens": 100000},
         system=system,
         messages=[{"role": "user", "content": user_msg}],
     )
@@ -199,6 +199,7 @@ def _generate_gpt(system: str, user_msg: str) -> dict:
         model=GPT_MODEL,
         instructions=system,
         input=user_msg,
+        max_output_tokens=100000,
         reasoning={"effort": "high", "summary": "auto"},
     )
     text = resp.output_text
@@ -216,8 +217,8 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
         contents=user_msg,
         config=genai.types.GenerateContentConfig(
             system_instruction=system,
-            thinking_config=genai.types.ThinkingConfig(thinking_budget=20000),
-            max_output_tokens=32000,
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=65536),
+            max_output_tokens=65536,
         ),
     )
     text = resp.text
