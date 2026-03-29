@@ -104,7 +104,7 @@ def run_evaluation(
     seed: int = 42,
     strategy_params: dict | None = None,
     instance_params: dict | None = None,
-    timeout: int = 120,
+    timeout: int = 600,
 ) -> EvalResult:
     """Evaluate a strategy on an instance.
 
