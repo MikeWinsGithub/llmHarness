@@ -310,4 +310,6 @@ def get_entry(eid):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5111)
+    port = int(os.environ.get("PORT", 5111))
+    debug = os.environ.get("RENDER") is None  # debug off in production
+    app.run(debug=debug, host="0.0.0.0", port=port)
