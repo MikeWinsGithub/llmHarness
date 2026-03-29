@@ -229,8 +229,8 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
 
 
 def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> dict:
-    """Use GPT 5.4 Pro Max to judge which candidate is best."""
-    from openai import OpenAI
+    """Use Claude Opus 4.6 to judge which candidate is best."""
+    import anthropic
 
     labels = "ABCDEFGHIJ"
     system = (
@@ -253,14 +253,15 @@ def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> di
         )
     parts.append(f"Which candidate is best? Respond with only the letter ({', '.join(labels[i] for i in range(len(candidates)))}).")
 
-    client = OpenAI(api_key=get_openai_api_key())
-    resp = client.responses.create(
-        model=GPT_MODEL,
-        instructions=system,
-        input="\n".join(parts),
-        reasoning={"effort": "xhigh", "summary": "auto"},
+    client = anthropic.Anthropic(api_key=get_api_key())
+    resp = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        thinking={"type": "adaptive", "effort": "max"},
+        system=system,
+        messages=[{"role": "user", "content": "\n".join(parts)}],
     )
-    choice = resp.output_text.strip().upper()
+    choice = next(b.text for b in resp.content if b.type == "text").strip().upper()
 
     # Parse the letter
     for i, label in enumerate(labels[:len(candidates)]):
@@ -367,14 +368,14 @@ Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
     # Phase 2: judge picks the best (skip if only 1 candidate)
     if len(candidates) == 1:
         winner = candidates[0]
-    elif get_openai_api_key():
+    elif get_api_key():
         try:
             winner = _judge_candidates(candidates, problem, role)
         except Exception as e:
             print(f"[suggest] Judge failed, using first candidate: {e}")
             winner = candidates[0]
     else:
-        # No OpenAI key for judging — just return first candidate
+        # No Anthropic key for judging — just return first candidate
         winner = candidates[0]
 
     return {"name": winner["name"], "description": winner["description"], "code": winner["code"]}
