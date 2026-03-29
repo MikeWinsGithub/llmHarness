@@ -1,0 +1,245 @@
+[
+  {
+    "id": "d6b94bc8",
+    "role": "strategy",
+    "problem_id": "oracle_averaging",
+    "name": "Simple averaging",
+    "description": "Naive Monte Carlo estimator. At stage d with budget d*k, it draws d inputs x uniformly from {0,1}^N, runs the oracle algorithm f^O(x) on each (costing k queries per run), and returns the sample mean. This gives unbiased estimates with variance ~1/d, so the per-stage Bayes risk E_d decays as O(1/d). Because the harmonic series diverges, the cumulative risk sum(E_d) diverges \u2014 this strategy is expected to fail the conjecture for any nontrivial instance.",
+    "code": "def estimate(runner, N, k, budget):\n    \"\"\"Sample random inputs, run f on each, average outputs.\"\"\"\n    import numpy as np\n    d = budget // k\n    if d == 0:\n        return 0.0\n    rng = np.random.default_rng()\n    total = 0.0\n    for _ in range(d):\n        x = rng.integers(0, 2, size=N).astype(np.int8)\n        total += runner.run_on_input(x)\n    return total / d\n",
+    "created_at": "2026-03-28 21:24:30",
+    "tunable_params": {},
+    "param_values": {}
+  },
+  {
+    "id": "4355a17e",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Adaptive chain",
+    "description": "An adaptive oracle algorithm where each query location depends on the previous oracle answer. It first hashes the input x into a starting location via loc = sum(x[i]*2^i) mod modulus, then makes chain_length sequential queries. After each query, the next location is computed as (loc + oracle_answer + step*step_multiplier) mod modulus, so the oracle's own answers determine the path through query space. This creates complex dependencies between oracle values, making it difficult for strategies that assume independence. The step_multiplier controls how far apart successive queries land in the location space.",
+    "code": "TUNABLE_PARAMS = {\n    \"chain_length\": {\"default\": 4, \"min\": 1, \"max\": 8, \"type\": \"int\",\n                     \"description\": \"Total oracle queries in chain (must be <= eval k)\"},\n    \"modulus\": {\"default\": 256, \"min\": 16, \"max\": 1024, \"type\": \"int\",\n                \"description\": \"Modular arithmetic base for locations\"},\n    \"step_multiplier\": {\"default\": 17, \"min\": 1, \"max\": 100, \"type\": \"int\",\n                        \"description\": \"Step multiplier for location updates\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Adaptive: each query location depends on the previous answer.\"\"\"\n    loc = 0\n    for i in range(len(x)):\n        loc = (loc * 2 + int(x[i])) % params[\"modulus\"]\n    val = query(loc)\n    for step in range(params[\"chain_length\"] - 1):\n        loc = (loc + val + step * params[\"step_multiplier\"]) % params[\"modulus\"]\n        val = query(loc)\n    return float(val)\n",
+    "created_at": "2026-03-28 21:24:30",
+    "tunable_params": {
+      "chain_length": {
+        "default": 4,
+        "min": 1,
+        "max": 8,
+        "type": "int",
+        "description": "Total oracle queries in chain (must be <= eval k)"
+      },
+      "modulus": {
+        "default": 256,
+        "min": 16,
+        "max": 1024,
+        "type": "int",
+        "description": "Modular arithmetic base for locations"
+      },
+      "step_multiplier": {
+        "default": 17,
+        "min": 1,
+        "max": 100,
+        "type": "int",
+        "description": "Step multiplier for location updates"
+      }
+    },
+    "param_values": {
+      "chain_length": 3,
+      "modulus": 256,
+      "step_multiplier": 17
+    }
+  },
+  {
+    "id": "08083c3c",
+    "role": "strategy",
+    "problem_id": "oracle_averaging",
+    "name": "Sample-Update",
+    "description": "Samples d inputs to reveal oracle values, then computes exact conditional expectation E[F(O)|observed] by enumerating all 2^N inputs and branching over unknown oracle queries.",
+    "code": "\nTUNABLE_PARAMS = {\n    \"num_mc_samples\": {\"default\": 64, \"min\": 16, \"max\": 1024, \"type\": \"int\",\n                       \"description\": \"Monte Carlo samples for unknown oracle values (when too many for exact branching)\"},\n    \"max_exact_unknowns\": {\"default\": 10, \"min\": 0, \"max\": 20, \"type\": \"int\",\n                           \"description\": \"Max unknown queries per input before switching from exact branching to MC\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef estimate(runner, N, k, budget):\n    \"\"\"Sample-Update: sample inputs to reveal oracle values, then compute\n    posterior mean E[F(O)|known]. Uses exact branching when unknowns are few,\n    falls back to Monte Carlo sampling otherwise.\"\"\"\n    import numpy as np\n\n    d = budget // k\n    if d == 0:\n        return 0.0\n\n    rng = np.random.default_rng()\n    for _ in range(d):\n        x = rng.integers(0, 2, size=N).astype(np.int8)\n        runner.run_on_input(x)\n\n    known = dict(runner.oracle.revealed)\n    num_mc = params[\"num_mc_samples\"]\n    max_exact = params[\"max_exact_unknowns\"]\n\n    class _Unknown(Exception):\n        def __init__(self, q): self.q = q\n    class _TooDeep(Exception):\n        pass\n\n    def _exact(x, kv, depth=0):\n        \"\"\"Exact posterior via recursive branching. Raises _TooDeep if too many unknowns.\"\"\"\n        if depth > max_exact:\n            raise _TooDeep()\n        def qf(q):\n            q = int(q)\n            if q in kv: return kv[q]\n            raise _Unknown(q)\n        try:\n            return float(np.clip(runner.instance_fn(x, qf), -1, 1))\n        except _Unknown as e:\n            return 0.5 * (_exact(x, {**kv, e.q: 1}, depth + 1) +\n                          _exact(x, {**kv, e.q: -1}, depth + 1))\n\n    def _mc(x):\n        \"\"\"MC estimate of E[f^O(x) | known].\"\"\"\n        acc = 0.0\n        for _ in range(num_mc):\n            si = dict(known)\n            def qi(q, _s=si):\n                q = int(q)\n                if q not in _s: _s[q] = rng.choice([-1, 1])\n                return _s[q]\n            acc += float(np.clip(runner.instance_fn(x, qi), -1, 1))\n        return acc / num_mc\n\n    def _posterior(x):\n        try:\n            return _exact(x, known)\n        except _TooDeep:\n            return _mc(x)\n\n    total = 0.0\n    for i in range(2 ** N):\n        x = np.array([(i >> bit) & 1 for bit in range(N)], dtype=np.int8)\n        total += _posterior(x)\n    return total / (2 ** N)\n",
+    "created_at": "2026-03-28 21:29:54",
+    "tunable_params": {
+      "num_mc_samples": {
+        "default": 64,
+        "min": 16,
+        "max": 1024,
+        "type": "int",
+        "description": "Monte Carlo samples for unknown oracle values (when too many for exact branching)"
+      },
+      "max_exact_unknowns": {
+        "default": 10,
+        "min": 0,
+        "max": 20,
+        "type": "int",
+        "description": "Max unknown queries per input before switching from exact branching to MC"
+      }
+    },
+    "param_values": {
+      "num_mc_samples": 64,
+      "max_exact_unknowns": 10
+    }
+  },
+  {
+    "id": "1c65e325",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Single query",
+    "description": "Encodes the entire input vector x as a single integer (treating it as a binary number) and queries the oracle at that integer modulo num_values. With N=8, x can take 256 distinct values; if num_values >= 256 then every input maps to a unique query location and F(O) is the mean of 256 independent oracle values. Reducing num_values causes collisions \u2014 multiple inputs map to the same query \u2014 which makes F(O) depend on fewer oracle bits and thus easier to estimate. This is the simplest non-trivial instance: depth 1, no adaptivity, and the difficulty is controlled entirely by how many distinct oracle locations are reachable.",
+    "code": "\nTUNABLE_PARAMS = {\n    \"num_values\": {\"default\": 256, \"min\": 2, \"max\": 65536, \"type\": \"int\",\n                    \"description\": \"Number of distinct query locations (x is hashed into [0, num_values))\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Encode full x as an integer, query oracle at that location mod num_values.\"\"\"\n    val = 0\n    for i in range(len(x)):\n        val = val * 2 + int(x[i])\n    q = val % params[\"num_values\"]\n    return float(query(q))\n",
+    "created_at": "2026-03-28 22:19:51",
+    "tunable_params": {
+      "num_values": {
+        "default": 256,
+        "min": 2,
+        "max": 65536,
+        "type": "int",
+        "description": "Number of distinct query locations (x is hashed into [0, num_values))"
+      }
+    },
+    "param_values": {
+      "num_values": 256
+    }
+  },
+  {
+    "id": "fdd50cdf",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Parity of k queries",
+    "description": "Makes num_queries oracle queries and returns their product (parity). For each query j, the query location is determined by hashing the full input x together with the query index j into the range [0, M), using a seeded RNG as a hash function. This means each query location is a pseudo-random function of x, and different queries hit essentially independent locations. The output is +1 if an even number of oracle answers are -1, and -1 otherwise. Because the output is a product of k independent oracle values, knowing any strict subset gives zero information about the product \u2014 a strategy must learn all k queried oracle values to predict the output. The parameter M controls the size of the oracle location space; larger M means less chance of collisions between queries, while smaller M increases the chance that different inputs share query locations, making estimation easier.",
+    "code": "\nTUNABLE_PARAMS = {\n    \"num_queries\": {\"default\": 4, \"min\": 1, \"max\": 8, \"type\": \"int\",\n                     \"description\": \"Number of oracle queries (must be <= eval k)\"},\n    \"M\": {\"default\": 256, \"min\": 2, \"max\": 65536, \"type\": \"int\",\n           \"description\": \"Number of possible query locations\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Make k queries at pseudo-random locations determined by x, return product.\"\"\"\n    import numpy as np\n    k = params[\"num_queries\"]\n    M = params[\"M\"]\n    x_int = 0\n    for i in range(len(x)):\n        x_int = x_int * 2 + int(x[i])\n    result = 1\n    for j in range(k):\n        loc = int(np.random.default_rng([x_int, j, 42]).integers(0, M))\n        result *= query(loc)\n    return float(result)\n",
+    "created_at": "2026-03-28 22:19:51",
+    "tunable_params": {
+      "num_queries": {
+        "default": 4,
+        "min": 1,
+        "max": 8,
+        "type": "int",
+        "description": "Number of oracle queries (must be <= eval k)"
+      },
+      "M": {
+        "default": 256,
+        "min": 2,
+        "max": 65536,
+        "type": "int",
+        "description": "Number of possible query locations"
+      }
+    },
+    "param_values": {
+      "num_queries": 4,
+      "M": 256
+    }
+  },
+  {
+    "id": "9ea2790c",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Layered graph",
+    "description": "A layered random-graph model from Section 4 of the oracle-averaging notes. The width W must be a power of 2. The input x is hashed to a start vertex in [0, W). At each of L layers, log2(W) oracle queries decode the next vertex as a binary integer, giving a true uniformly random map [W] -> [W] at each layer. A final oracle query gives the terminal \u00b11 sign. Because the transitions are full random maps, paths merge frequently: with W starts and W possible targets, the expected number of distinct images is W(1 - (1-1/W)^W) \u2248 W(1 - 1/e), so roughly 37%% of paths collide at each layer. This merging means that learning one path's suffix reveals the suffix for all paths that merge into it \u2014 the key structural feature that creates massive information reuse. Queries per input = L*log2(W)+1, so the default (W=8, L=1) uses 4 queries, matching the default k=4. Increase k for deeper configurations.",
+    "code": "\nTUNABLE_PARAMS = {\n    \"width\": {\"default\": 8, \"min\": 2, \"max\": 256, \"type\": \"int\",\n              \"description\": \"Vertices per layer (must be power of 2)\"},\n    \"depth\": {\"default\": 1, \"min\": 1, \"max\": 16, \"type\": \"int\",\n              \"description\": \"Transition layers (queries per input = depth * log2(width) + 1, must be <= eval k)\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Layered model: log2(W) oracle bits per transition give true random maps [W]->[W].\"\"\"\n    import numpy as np\n    W = params[\"width\"]\n    L = params[\"depth\"]\n    bits = int(np.log2(W))\n\n    x_int = 0\n    for i in range(len(x)):\n        x_int = x_int * 2 + int(x[i])\n    v = x_int % W\n\n    for layer in range(L):\n        next_v = 0\n        for b in range(bits):\n            qid = layer * W * bits + v * bits + b\n            next_v = next_v * 2 + ((query(qid) + 1) // 2)\n        v = next_v\n\n    sign_qid = L * W * bits + v\n    return float(query(sign_qid))\n",
+    "created_at": "2026-03-28 22:41:07",
+    "tunable_params": {
+      "width": {
+        "default": 8,
+        "min": 2,
+        "max": 256,
+        "type": "int",
+        "description": "Vertices per layer (must be power of 2)"
+      },
+      "depth": {
+        "default": 1,
+        "min": 1,
+        "max": 16,
+        "type": "int",
+        "description": "Transition layers (queries per input = depth * log2(width) + 1, must be <= eval k)"
+      }
+    },
+    "param_values": {
+      "width": 8,
+      "depth": 1
+    }
+  },
+  {
+    "id": "07d3977a",
+    "role": "strategy",
+    "problem_id": "oracle_averaging",
+    "name": "Merge-aware",
+    "description": "Like Sample-Update, but never wastes budget on an oracle query whose answer is already known. It iterates through all 2^N inputs in random order, running each through the instance function with a smart query wrapper: if the oracle value at a location was already revealed by a previous input, it returns the cached value for free (no budget cost). Only genuinely new oracle queries count against the budget. When the budget is exhausted, it stops exploring and computes the exact posterior mean E[F(O) | revealed] by enumerating all 2^N inputs and branching over unknown oracle values, just like Sample-Update. This is strictly better than Sample-Update because it processes more inputs per unit of budget \u2014 whenever two inputs share an oracle query, the second one gets it for free. The advantage is largest on instances with heavy query overlap between inputs, such as the layered graph where many paths merge through shared vertices.",
+    "code": "\nTUNABLE_PARAMS = {\n    \"num_mc_samples\": {\"default\": 64, \"min\": 16, \"max\": 1024, \"type\": \"int\",\n                       \"description\": \"Monte Carlo samples for unknown oracle values (when too many for exact branching)\"},\n    \"max_exact_unknowns\": {\"default\": 10, \"min\": 0, \"max\": 20, \"type\": \"int\",\n                           \"description\": \"Max unknown queries per input before switching from exact branching to MC\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef estimate(runner, N, k, budget):\n    \"\"\"Merge-aware: explore inputs with cached oracle queries (free repeats),\n    then compute posterior mean. Uses exact branching when unknowns are few,\n    falls back to Monte Carlo sampling otherwise.\"\"\"\n    import numpy as np\n\n    queries_used = 0\n    cache = {}\n\n    class BudgetExhausted(Exception):\n        pass\n\n    def smart_query(q):\n        nonlocal queries_used\n        q = int(q)\n        if q in cache:\n            return cache[q]\n        if queries_used >= budget:\n            raise BudgetExhausted()\n        val = runner.oracle.query(q)\n        queries_used += 1\n        cache[q] = val\n        return val\n\n    rng = np.random.default_rng()\n    try:\n        for idx in rng.permutation(2 ** N):\n            x = np.array([(idx >> bit) & 1 for bit in range(N)], dtype=np.int8)\n            runner.instance_fn(x, smart_query)\n    except BudgetExhausted:\n        pass\n\n    known = dict(cache)\n    num_mc = params[\"num_mc_samples\"]\n    max_exact = params[\"max_exact_unknowns\"]\n\n    class _Unknown(Exception):\n        def __init__(self, q): self.q = q\n    class _TooDeep(Exception):\n        pass\n\n    def _exact(x, kv, depth=0):\n        \"\"\"Exact posterior via recursive branching. Raises _TooDeep if too many unknowns.\"\"\"\n        if depth > max_exact:\n            raise _TooDeep()\n        def qf(q):\n            q = int(q)\n            if q in kv: return kv[q]\n            raise _Unknown(q)\n        try:\n            return float(np.clip(runner.instance_fn(x, qf), -1, 1))\n        except _Unknown as e:\n            return 0.5 * (_exact(x, {**kv, e.q: 1}, depth + 1) +\n                          _exact(x, {**kv, e.q: -1}, depth + 1))\n\n    def _mc(x):\n        \"\"\"MC estimate of E[f^O(x) | known].\"\"\"\n        acc = 0.0\n        for _ in range(num_mc):\n            si = dict(known)\n            def qi(q, _s=si):\n                q = int(q)\n                if q not in _s: _s[q] = rng.choice([-1, 1])\n                return _s[q]\n            acc += float(np.clip(runner.instance_fn(x, qi), -1, 1))\n        return acc / num_mc\n\n    def _posterior(x):\n        try:\n            return _exact(x, known)\n        except _TooDeep:\n            return _mc(x)\n\n    total = 0.0\n    for i in range(2 ** N):\n        x = np.array([(i >> bit) & 1 for bit in range(N)], dtype=np.int8)\n        total += _posterior(x)\n    return total / (2 ** N)\n",
+    "created_at": "2026-03-28 22:47:05",
+    "tunable_params": {
+      "num_mc_samples": {
+        "default": 64,
+        "min": 16,
+        "max": 1024,
+        "type": "int",
+        "description": "Monte Carlo samples for unknown oracle values (when too many for exact branching)"
+      },
+      "max_exact_unknowns": {
+        "default": 10,
+        "min": 0,
+        "max": 20,
+        "type": "int",
+        "description": "Max unknown queries per input before switching from exact branching to MC"
+      }
+    },
+    "param_values": {
+      "num_mc_samples": 64,
+      "max_exact_unknowns": 10
+    }
+  },
+  {
+    "id": "eebbbedf",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Deep Layered Graph",
+    "description": "## Deep Layered Graph (depth = 20\u00b7N)\n\nA variant of the Layered Graph instance where the number of transition layers L is set to 20 times the input dimension N, rather than being a small fixed constant. This creates an extremely deep layered random-graph computation.\n\n### Algorithm (step by step)\n\n1. **Parameters**: Width W (a power of 2, default 8), and a depth multiplier (default 20). The actual depth is L = depth_multiplier \u00d7 N, where N = len(x).\n\n2. **Start vertex**: Hash the input x into a starting vertex v in [0, W) by interpreting x as a binary integer modulo W (same as the original layered graph).\n\n3. **Layered transitions** (L layers): At each layer \u2113 \u2208 {0, 1, \u2026, L\u22121}, decode the next vertex from log\u2082(W) oracle queries. Specifically, for bit b \u2208 {0, \u2026, log\u2082(W)\u22121}, query location `qid = \u2113 * W * log\u2082(W) + v * log\u2082(W) + b`. Convert the \u00b11 oracle answer to a bit via `(answer + 1) // 2`, and assemble the bits into the next vertex (MSB-first). Set v = next_v.\n\n4. **Terminal sign**: Query location `qid = L * W * log\u2082(W) + v` and return that \u00b11 value.\n\n### Queries per input\nL \u00b7 log\u2082(W) + 1 = 20\u00b7N\u00b7log\u2082(W) + 1. With the defaults (N=8, W=8), this is 20\u00b78\u00b73 + 1 = **481 queries per input**, so k must be at least 481.\n\n### Why this is interesting\nThe extreme depth (160 layers for N=8) means each input traces a very long path through the graph. Because each layer implements a full random map [W] \u2192 [W], paths merge aggressively: after O(W) steps most paths have coalesced to a single vertex. After 160 layers with W=8, essentially **all** 256 inputs will share the same suffix for the vast majority of the computation. This means that learning one path reveals almost all other paths' outputs, making F(O) effectively depend on very few oracle bits. The deep merging structure should be very favorable for merge-aware strategies (which exploit shared queries) and should test whether strategies can discover and exploit this coalescence. The total oracle location space is L\u00b7W\u00b7log\u2082(W) + W = 160\u00b78\u00b73 + 8 = 3848 distinct possible query locations, but the number actually reachable from any input is only 481, and due to merging, far fewer are distinct across all inputs.\n\n### Parameters\n\n- **width** (default=8, int, min=2, max=256): Vertices per layer (must be a power of 2).\n- **depth_multiplier** (default=20, int, min=1, max=100): Multiplied by N to get the number of transition layers. Controls how deep the computation is relative to input dimension.\n\n```python\nTUNABLE_PARAMS = {\n    \"width\": {\"default\": 8, \"min\": 2, \"max\": 256, \"type\": \"int\",\n              \"description\": \"Vertices per layer (must be power of 2)\"},\n    \"depth_multiplier\": {\"default\": 20, \"min\": 1, \"max\": 100, \"type\": \"int\",\n                         \"description\": \"Multiplied by N to get number of transition layers\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Deep layered graph: L = depth_multiplier * N transition layers with random maps [W]->[W].\"\"\"\n    import numpy as np\n    W = params[\"width\"]\n    N = len(x)\n    L = params[\"depth_multiplier\"] * N\n    bits = int(np.log2(W))\n\n    x_int = 0\n    for i in range(N):\n        x_int = x_int * 2 + int(x[i])\n    v = x_int % W\n\n    for layer in range(L):\n        next_v = 0\n        for b in range(bits):\n            qid = layer * W * bits + v * bits + b\n            next_v = next_v * 2 + ((query(qid) + 1) // 2)\n        v = next_v\n\n    sign_qid = L * W * bits + v\n    return float(query(sign_qid))\n```",
+    "code": "TUNABLE_PARAMS = {\n    \"width\": {\"default\": 8, \"min\": 2, \"max\": 256, \"type\": \"int\",\n              \"description\": \"Vertices per layer (must be power of 2)\"},\n    \"depth_multiplier\": {\"default\": 20, \"min\": 1, \"max\": 100, \"type\": \"int\",\n                         \"description\": \"Multiplied by N to get number of transition layers\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Deep layered graph: L = depth_multiplier * N transition layers with random maps [W]->[W].\"\"\"\n    import numpy as np\n    W = params[\"width\"]\n    N = len(x)\n    L = params[\"depth_multiplier\"] * N\n    bits = int(np.log2(W))\n\n    x_int = 0\n    for i in range(N):\n        x_int = x_int * 2 + int(x[i])\n    v = x_int % W\n\n    for layer in range(L):\n        next_v = 0\n        for b in range(bits):\n            qid = layer * W * bits + v * bits + b\n            next_v = next_v * 2 + ((query(qid) + 1) // 2)\n        v = next_v\n\n    sign_qid = L * W * bits + v\n    return float(query(sign_qid))",
+    "created_at": "2026-03-29 08:09:48",
+    "tunable_params": {
+      "width": {
+        "default": 8,
+        "min": 2,
+        "max": 256,
+        "type": "int",
+        "description": "Vertices per layer (must be power of 2)"
+      },
+      "depth_multiplier": {
+        "default": 20,
+        "min": 1,
+        "max": 100,
+        "type": "int",
+        "description": "Multiplied by N to get number of transition layers"
+      }
+    },
+    "param_values": {
+      "width": 8,
+      "depth_multiplier": 20
+    }
+  },
+  {
+    "id": "5dd882a1",
+    "role": "instance",
+    "problem_id": "oracle_averaging",
+    "name": "Cone",
+    "description": "## Narrowing Funnel Graph\n\nA layered oracle algorithm with **exponentially narrowing** layers. Unlike the standard Layered Graph (constant width), each successive layer has fewer nodes by a factor of `fanin`, creating a funnel that forces aggressive path merging.\n\n### Structure\n\n- **Layer 0 (input layer)**: `fanin^L` nodes, where L = `num_layers`.\n- **Layer 1**: `fanin^(L-1)` nodes.\n- **Layer \u2113**: `fanin^(L-\u2113)` nodes.\n- **Layer L (final)**: `fanin^0 = 1` node... no \u2014 actually the final *transition* layer has `fanin` nodes, each resolving to a single oracle query for the terminal \u00b11 sign.\n\n### Algorithm (step by step)\n\n1. **Start vertex**: Interpret x as a binary integer and compute `v = x_int mod fanin^L`. This is the starting node in layer 0 (which has `fanin^L` nodes).\n\n2. **Layer transitions** (L\u22121 transitions, from layer 0 to layer L\u22121): At transition \u2113 (\u2113 = 0, 1, \u2026, L\u22122), the current layer has `fanin^(L\u2212\u2113)` nodes and the next layer has `fanin^(L\u2212\u2113\u22121)` nodes. To determine the next vertex:\n   - We need `(L\u2212\u2113\u22121) * bits_per_fanin` oracle bits, where `bits_per_fanin = ceil(log2(fanin))`, to fully encode a random target in `[0, fanin^(L\u2212\u2113\u22121))`.\n   - For each bit b \u2208 {0, \u2026, (L\u2212\u2113\u22121)\u00b7bits_per_fanin \u2212 1}, compute a unique query location `qid = offset(\u2113) + v \u00b7 num_bits_needed + b`, where `offset(\u2113)` is the cumulative offset for layer \u2113 and `v` is the current vertex. Query the oracle at `qid`. Convert the \u00b11 answer to a bit via `(answer + 1) // 2`.\n   - Assemble all bits MSB-first into the next vertex `next_v \u2208 [0, fanin^(L\u2212\u2113\u22121))`. Set `v = next_v`.\n   \n   Because the target is fully encoded by oracle bits (independent of the source vertex beyond determining query locations), each source node maps to a **uniformly random** target \u2014 a true random map from `fanin^(L\u2212\u2113)` nodes to `fanin^(L\u2212\u2113\u22121)` nodes.\n\n3. **Terminal sign**: After all transitions, `v \u2208 [0, fanin)`. Query the oracle at location `final_offset + v` and return that \u00b11 value.\n\n### Query location offset scheme\n\nLayer \u2113's query block starts at `offset(\u2113) = sum over \u2113'<\u2113 of [fanin^(L\u2212\u2113') \u00d7 (L\u2212\u2113'\u22121) \u00d7 bits_per_fanin]`. The final sign queries start at `offset(L\u22121) = sum over all transition layers`. Each vertex at each layer gets its own dedicated block of oracle query locations, ensuring independence.\n\n### Queries per input\n\n`sum_{\u2113=0}^{L-2} (L\u2212\u2113\u22121) \u00d7 bits_per_fanin + 1 = bits_per_fanin \u00d7 L\u00d7(L\u22121)/2 + 1`\n\nWith defaults `fanin=2, L=3`: `1 \u00d7 3 + 1 = 4` queries, matching k=4.\n\n### Why this is interesting\n\nThe narrowing funnel creates **forced merging** far more aggressive than constant-width graphs. At transition \u2113, `fanin^(L\u2212\u2113)` source nodes map randomly to `fanin^(L\u2212\u2113\u22121)` targets \u2014 a `fanin`-to-1 ratio on average. By the birthday/coupon-collector effect, even before reaching the final layer, most paths have coalesced. After all transitions, **all** `fanin^L` starting nodes funnel into just `fanin` final nodes. Learning the sign query for those `fanin` terminal nodes determines every input's output \u2014 so F(O) depends on at most `fanin` oracle bits regardless of L. This means F(O) has very low effective dimension, and merge-aware strategies that discover the shared suffix structure can estimate F(O) with very few total queries. The narrowing creates a natural hierarchy of information: later layers are shared by exponentially more inputs than earlier layers.\n\n### Parameters\n\n- **fanin** (default=2, int, min=2, max=8): Base of the exponential narrowing. Layer widths are fanin^L, fanin^(L-1), \u2026, fanin. Must be a power of 2 (so that bits_per_fanin = log2(fanin) is an integer).\n- **num_layers** (default=3, int, min=2, max=8): Number of layers L. Input space has fanin^L nodes. Queries per input = ceil(log2(fanin)) \u00d7 L\u00d7(L\u22121)/2 + 1.\n\n```python\nTUNABLE_PARAMS = {\n    \"fanin\": {\"default\": 2, \"min\": 2, \"max\": 8, \"type\": \"int\",\n              \"description\": \"Base of exponential narrowing (must be power of 2)\"},\n    \"num_layers\": {\"default\": 3, \"min\": 2, \"max\": 8, \"type\": \"int\",\n                   \"description\": \"Number of layers L (input space = fanin^L nodes)\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Narrowing funnel: layers shrink exponentially, forcing aggressive path merging.\"\"\"\n    import numpy as np\n    fanin = params[\"fanin\"]\n    L = params[\"num_layers\"]\n    bits_per_fanin = int(np.log2(fanin))\n\n    # Hash input to starting vertex in [0, fanin^L)\n    x_int = 0\n    for i in range(len(x)):\n        x_int = x_int * 2 + int(x[i])\n    v = x_int % (fanin ** L)\n\n    # Precompute query location offsets for each layer transition\n    offset = 0\n    for layer in range(L - 1):\n        layer_width = fanin ** (L - layer)       # nodes in current layer\n        target_digits = L - layer - 1             # digits needed for next layer\n        num_bits = target_digits * bits_per_fanin # oracle bits per node\n\n        # Decode next vertex from oracle queries\n        next_v = 0\n        for b in range(num_bits):\n            qid = offset + v * num_bits + b\n            next_v = next_v * 2 + ((query(qid) + 1) // 2)\n        v = next_v\n\n        # Advance offset past this layer's entire query block\n        offset += layer_width * num_bits\n\n    # Terminal sign query: v is now in [0, fanin)\n    sign_qid = offset + v\n    return float(query(sign_qid))\n```",
+    "code": "TUNABLE_PARAMS = {\n    \"fanin\": {\"default\": 2, \"min\": 2, \"max\": 8, \"type\": \"int\",\n              \"description\": \"Base of exponential narrowing (must be power of 2)\"},\n    \"num_layers\": {\"default\": 3, \"min\": 2, \"max\": 8, \"type\": \"int\",\n                   \"description\": \"Number of layers L (input space = fanin^L nodes)\"},\n}\nparams = {name: spec[\"default\"] for name, spec in TUNABLE_PARAMS.items()}\n\ndef oracle_algorithm(x, query):\n    \"\"\"Narrowing funnel: layers shrink exponentially, forcing aggressive path merging.\"\"\"\n    import numpy as np\n    fanin = params[\"fanin\"]\n    L = params[\"num_layers\"]\n    bits_per_fanin = int(np.log2(fanin))\n\n    # Hash input to starting vertex in [0, fanin^L)\n    x_int = 0\n    for i in range(len(x)):\n        x_int = x_int * 2 + int(x[i])\n    v = x_int % (fanin ** L)\n\n    # Precompute query location offsets for each layer transition\n    offset = 0\n    for layer in range(L - 1):\n        layer_width = fanin ** (L - layer)       # nodes in current layer\n        target_digits = L - layer - 1             # digits needed for next layer\n        num_bits = target_digits * bits_per_fanin # oracle bits per node\n\n        # Decode next vertex from oracle queries\n        next_v = 0\n        for b in range(num_bits):\n            qid = offset + v * num_bits + b\n            next_v = next_v * 2 + ((query(qid) + 1) // 2)\n        v = next_v\n\n        # Advance offset past this layer's entire query block\n        offset += layer_width * num_bits\n\n    # Terminal sign query: v is now in [0, fanin)\n    sign_qid = offset + v\n    return float(query(sign_qid))",
+    "created_at": "2026-03-29 08:14:13",
+    "tunable_params": {
+      "fanin": {
+        "default": 2,
+        "min": 2,
+        "max": 8,
+        "type": "int",
+        "description": "Base of exponential narrowing (must be power of 2)"
+      },
+      "num_layers": {
+        "default": 3,
+        "min": 2,
+        "max": 8,
+        "type": "int",
+        "description": "Number of layers L (input space = fanin^L nodes)"
+      }
+    },
+    "param_values": {
+      "fanin": 2,
+      "num_layers": 3
+    }
+  }
+]

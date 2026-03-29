@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install:*)",
+      "Bash(curl -s -X POST http://localhost:5111/api/problems/oracle_averaging/evaluate_all -H 'Content-Type: application/json' -d '{\"\"\"\"force\"\"\"\": true}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import sys,json; [print\\(f''''{r.get\\(\"\"strategy_id\"\",\"\"\"\"\\)[:4]} x {r.get\\(\"\"instance_id\"\",\"\"\"\"\\)[:4]}: {r.get\\(\"\"summary\"\",r.get\\(\"\"error\"\",\"\"?\"\"\\)\\)}''''\\) for r in json.load\\(sys.stdin\\)]\")",
+      "Bash(python3 -c \":*)",
+      "Bash(python3:*)",
+      "Bash(wait)"
+    ]
+  }
+}

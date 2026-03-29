@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Conjecture Harness</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); padding: 24px; }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  h2 { font-size: 1.1em; color: var(--muted); margin-bottom: 20px; font-weight: normal; }
+  h3 { font-size: 1em; margin-bottom: 12px; }
+
+  .top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .problem-select { background: var(--surface); color: var(--text); border: 1px solid var(--border);
+                     padding: 6px 10px; border-radius: 6px; font-size: 0.9em; }
+
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .panel h3 { display: flex; justify-content: space-between; align-items: center; }
+
+  .entry-list { list-style: none; max-height: 200px; overflow-y: auto; margin-bottom: 12px; }
+  .entry-list li { padding: 6px 8px; border-radius: 4px; cursor: pointer; display: flex;
+                   justify-content: space-between; align-items: flex-start; font-size: 0.85em; }
+  .entry-list li:hover { background: rgba(88,166,255,0.1); }
+  .entry-list li.selected { background: rgba(88,166,255,0.15); border-left: 2px solid var(--accent); }
+  .entry-name { flex: 1; }
+  .entry-desc { font-size: 0.8em; color: var(--muted); margin-top: 2px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; }
+  .entry-delete { color: var(--muted); cursor: pointer; font-size: 0.8em; padding: 2px 6px; }
+  .entry-delete:hover { color: var(--red); }
+
+  .submit-form { display: flex; flex-direction: column; gap: 8px; }
+  .submit-form input, .submit-form textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px; font-size: 0.85em; font-family: inherit;
+  }
+  .submit-form textarea { min-height: 60px; resize: vertical; }
+  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 14px;
+         border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 500; }
+  .btn:hover { opacity: 0.9; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+  .btn-row { display: flex; gap: 8px; }
+
+  /* Results matrix */
+  .results-section { background: var(--surface); border: 1px solid var(--border);
+                     border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+  .matrix-wrapper { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+  th, td { padding: 8px 12px; border: 1px solid var(--border); text-align: center; }
+  th { background: var(--bg); color: var(--muted); font-weight: 500; }
+  td.pass { background: rgba(63,185,80,0.12); color: var(--green); }
+  td.fail { background: rgba(248,81,73,0.12); color: var(--red); }
+  td.pending { color: var(--muted); font-style: italic; }
+  td.error { background: rgba(210,153,34,0.12); color: var(--yellow); }
+  td { cursor: pointer; }
+  td:hover { outline: 1px solid var(--accent); }
+
+  /* Detail panel */
+  .detail-panel { background: var(--surface); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 16px; margin-bottom: 24px; }
+  .detail-panel pre { background: var(--bg); padding: 12px; border-radius: 6px;
+                      overflow-x: auto; font-size: 0.82em; line-height: 1.5; }
+  .detail-panel .chart { width: 100%; height: 200px; margin: 12px 0; }
+  .tabs { display: flex; gap: 0; margin-bottom: 12px; }
+  .tab { padding: 6px 14px; border: 1px solid var(--border); cursor: pointer;
+         font-size: 0.85em; color: var(--muted); background: var(--bg); }
+  .tab:first-child { border-radius: 6px 0 0 6px; }
+  .tab:last-child { border-radius: 0 6px 6px 0; }
+  .tab.active { background: var(--surface); color: var(--text); border-color: var(--accent); }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .status-msg { padding: 8px 12px; border-radius: 6px; font-size: 0.85em; margin-bottom: 12px; }
+  .status-msg.info { background: rgba(88,166,255,0.1); color: var(--accent); }
+  .status-msg.error { background: rgba(248,81,73,0.1); color: var(--red); }
+
+  .api-key-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
+                 padding: 10px 14px; background: var(--surface); border: 1px solid var(--border);
+                 border-radius: 8px; font-size: 0.85em; }
+  .api-key-bar input { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+                       border-radius: 6px; padding: 6px 10px; font-size: 0.85em; width: 320px;
+                       font-family: monospace; }
+  .api-key-bar .key-status { color: var(--muted); }
+  .api-key-bar .key-status.ok { color: var(--green); }
+
+  /* Parameter popover */
+  .param-popover {
+    display: none; position: fixed; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; z-index: 1000; min-width: 260px; max-width: 380px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .param-popover h4 { margin: 0 0 10px 0; font-size: 0.9em; color: var(--accent); }
+  .param-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .param-row label { min-width: 90px; color: var(--text); font-family: monospace; font-size: 0.82em; }
+  .param-row input[type="number"] {
+    width: 72px; background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 6px; font-size: 0.82em; font-family: monospace;
+  }
+  .param-row input[type="number"]:focus { border-color: var(--accent); outline: none; }
+  .param-desc { color: var(--muted); font-size: 0.72em; flex: 1; }
+  .entry-gear { color: var(--accent); font-size: 0.75em; opacity: 0.6; margin-left: 4px; }
+  .entry-list li:hover .entry-gear { opacity: 1; }
+
+  /* AI suggest section */
+  .suggest-section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; margin-bottom: 24px;
+  }
+  .suggest-section h3 { margin-bottom: 10px; }
+  .suggest-section .btn-row { gap: 12px; }
+  .btn-suggest {
+    background: linear-gradient(135deg, #6e40c9, #58a6ff); color: #fff; border: none;
+    padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: 500;
+  }
+  .btn-suggest:hover { opacity: 0.9; }
+  .btn-suggest:disabled { opacity: 0.4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <div>
+    <h1>Conjecture Harness</h1>
+    <h2 id="problemDesc">Loading...</h2>
+  </div>
+  <div class="btn-row">
+    <select class="problem-select" id="problemSelect"></select>
+    <button class="btn" onclick="evaluateAll()">Evaluate All</button>
+  </div>
+</div>
+
+<div class="api-key-bar" id="apiKeyBar">
+  <span>Anthropic API Key:</span>
+  <input type="password" id="apiKeyInput" placeholder="sk-ant-..." onkeydown="if(event.key==='Enter')saveApiKey()">
+  <button class="btn" onclick="saveApiKey()" style="padding:6px 12px">Save</button>
+  <span class="key-status" id="keyStatus">Not set</span>
+</div>
+
+<div id="statusArea"></div>
+
+<div class="panels">
+  <!-- Strategies panel -->
+  <div class="panel">
+    <h3>Strategies <span class="muted" id="stratCount"></span></h3>
+    <ul class="entry-list" id="stratList"></ul>
+    <div class="submit-form">
+      <input id="stratName" placeholder="Name (e.g. 'Posterior mean with caching')">
+      <textarea id="stratDesc" placeholder="Describe the strategy in natural language..."></textarea>
+      <div class="btn-row">
+        <button class="btn" onclick="submitEntry('strategy')">Generate Code</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Instances panel -->
+  <div class="panel">
+    <h3>Instances <span class="muted" id="instCount"></span></h3>
+    <ul class="entry-list" id="instList"></ul>
+    <div class="submit-form">
+      <input id="instName" placeholder="Name (e.g. 'Parity on first k bits')">
+      <textarea id="instDesc" placeholder="Describe the instance in natural language..."></textarea>
+      <div class="btn-row">
+        <button class="btn" onclick="submitEntry('instance')">Generate Code</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Results matrix -->
+<div class="results-section">
+  <h3>Results Matrix</h3>
+  <div class="matrix-wrapper" id="matrixArea">
+    <p style="color:var(--muted);font-size:0.85em">Submit strategies and instances to see results.</p>
+  </div>
+</div>
+
+<!-- Detail panel (shown when clicking a cell) -->
+<div class="detail-panel" id="detailPanel" style="display:none">
+  <div class="tabs" id="detailTabs">
+    <div class="tab active" onclick="showDetailTab('desc')">Description</div>
+    <div class="tab" onclick="showDetailTab('summary')">Summary</div>
+    <div class="tab" onclick="showDetailTab('chart')">E_d Chart</div>
+    <div class="tab" onclick="showDetailTab('stratcode')">Strategy Code</div>
+    <div class="tab" onclick="showDetailTab('instcode')">Instance Code</div>
+  </div>
+  <div id="detailContent"></div>
+</div>
+
+<!-- AI suggestions -->
+<div class="suggest-section">
+  <h3>AI Suggestions</h3>
+  <p style="color:var(--muted);font-size:0.85em;margin-bottom:12px">
+    Ask Opus to analyze everything so far and propose something novel.
+  </p>
+  <div class="btn-row">
+    <button class="btn-suggest" id="suggestStratBtn" onclick="suggestEntry('strategy')">Suggest New Strategy</button>
+    <button class="btn-suggest" id="suggestInstBtn" onclick="suggestEntry('instance')">Suggest New Instance</button>
+  </div>
+</div>
+
+<div id="paramPopover" class="param-popover" onmouseenter="keepParamPopover()" onmouseleave="hideParamPopover(100)"></div>
+
+<script>
+const API = '';
+let currentProblem = null;
+let strategies = [], instances = [], results = [];
+let selectedDetail = null;
+let pendingClarification = null;
+
+async function api(path, opts) {
+  try {
+    const r = await fetch(API + path, opts);
+    return await r.json();
+  } catch (e) {
+    console.error('API error:', path, e);
+    return {};
+  }
+}
+
+async function checkApiKey() {
+  const cfg = await api('/api/config');
+  const el = document.getElementById('keyStatus');
+  if (cfg.has_api_key) {
+    el.textContent = `Key set (${cfg.key_preview})`;
+    el.className = 'key-status ok';
+    document.getElementById('apiKeyInput').placeholder = 'Key saved — paste new key to change';
+  } else {
+    el.textContent = 'Not set — code generation will not work';
+    el.className = 'key-status';
+  }
+}
+
+async function saveApiKey() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (!key) return;
+  await api('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ api_key: key }),
+  });
+  document.getElementById('apiKeyInput').value = '';
+  showStatus('API key saved.', 'info');
+  await checkApiKey();
+}
+
+async function init() {
+  try { await checkApiKey(); } catch(e) { console.error('checkApiKey failed:', e); }
+  const problems = await api('/api/problems');
+  const sel = document.getElementById('problemSelect');
+  sel.innerHTML = problems.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+  sel.onchange = () => loadProblem(sel.value);
+  if (problems.length) loadProblem(problems[0].id);
+}
+
+async function loadProblem(pid) {
+  currentProblem = pid;
+  const problems = await api('/api/problems');
+  const p = problems.find(x => x.id === pid);
+  document.getElementById('problemDesc').textContent = p ? p.description : '';
+  await refresh();
+}
+
+async function refresh() {
+  const data = await api(`/api/problems/${currentProblem}/entries`);
+  strategies = data.strategies || [];
+  instances = data.instances || [];
+  results = await api(`/api/problems/${currentProblem}/results`);
+  renderLists();
+  renderMatrix();
+}
+
+function renderLists() {
+  const renderList = (items, elId, countId) => {
+    document.getElementById(countId).textContent = `(${items.length})`;
+    document.getElementById(elId).innerHTML = items.map(e => {
+      const hasParams = e.tunable_params && Object.keys(e.tunable_params).length > 0;
+      const hoverAttr = hasParams ? ` onmouseenter="showParamPopover('${e.id}', this)" onmouseleave="hideParamPopover()"` : '';
+      const gear = hasParams ? '<span class="entry-gear" title="Has tunable parameters">&#9881;</span>' : '';
+      return `<li onclick="showEntry('${e.id}')"${hoverAttr}>
+        <div class="entry-name">
+          ${esc(e.name)}${gear}
+          <div class="entry-desc" title="${esc(e.description)}">${esc(e.description)}</div>
+        </div>
+        <span class="entry-delete" onclick="event.stopPropagation();deleteEntry('${e.id}')">&#10005;</span>
+      </li>`;
+    }).join('') || '<li style="color:var(--muted)">None yet</li>';
+  };
+  renderList(strategies, 'stratList', 'stratCount');
+  renderList(instances, 'instList', 'instCount');
+}
+
+function renderMatrix() {
+  if (!strategies.length || !instances.length) {
+    document.getElementById('matrixArea').innerHTML =
+      '<p style="color:var(--muted);font-size:0.85em">Add strategies and instances to see the results matrix.</p>';
+    return;
+  }
+
+  const resultMap = {};
+  results.forEach(r => { resultMap[r.strategy_id + '|' + r.instance_id] = r; });
+
+  let html = '<table><thead><tr><th></th>';
+  instances.forEach(inst => { html += `<th title="${esc(inst.description)}">${esc(inst.name)}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  strategies.forEach(s => {
+    html += `<tr><th title="${esc(s.description)}">${esc(s.name)}</th>`;
+    instances.forEach(inst => {
+      const key = s.id + '|' + inst.id;
+      const r = resultMap[key];
+      if (!r) {
+        html += `<td class="pending" onclick="evalOne('${s.id}','${inst.id}')">—</td>`;
+      } else if (r.error) {
+        html += `<td class="error" onclick="showResult('${s.id}','${inst.id}')" title="${esc(r.error)}">err</td>`;
+      } else {
+        const cls = r.conjecture_holds ? 'pass' : 'fail';
+        html += `<td class="${cls}" onclick="showResult('${s.id}','${inst.id}')">${r.metrics.cumulative_risk.toFixed(3)}</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  document.getElementById('matrixArea').innerHTML = html;
+}
+
+async function submitEntry(role, clarification) {
+  const nameEl = role === 'strategy' ? 'stratName' : 'instName';
+  const descEl = role === 'strategy' ? 'stratDesc' : 'instDesc';
+  let name, desc;
+
+  if (clarification && pendingClarification) {
+    // Resubmitting with clarification
+    name = pendingClarification.name;
+    desc = pendingClarification.description;
+  } else {
+    name = document.getElementById(nameEl).value.trim();
+    desc = document.getElementById(descEl).value.trim();
+    if (!desc) return showStatus('Please enter a description.', 'error');
+  }
+
+  const phase = clarification ? 'Generating code' : 'Processing description';
+  showStatus(`<span class="spinner"></span> ${phase}...`, 'info');
+  try {
+    const body = { role, name: name || 'Unnamed', description: desc };
+    if (clarification) body.clarification = clarification;
+
+    const r = await api(`/api/problems/${currentProblem}/submit`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+
+    if (r.needs_clarification) {
+      pendingClarification = { role, name: name || 'Unnamed', description: desc };
+      showClarificationPrompt(r.question);
+      return;
+    }
+
+    if (r.error) throw new Error(r.error);
+    pendingClarification = null;
+    document.getElementById(nameEl).value = '';
+    document.getElementById(descEl).value = '';
+    showStatus(`${role} "${r.name}" created.`, 'info');
+    await refresh();
+  } catch (e) {
+    pendingClarification = null;
+    showStatus(`Error: ${e.message}`, 'error');
+  }
+}
+
+function showClarificationPrompt(question) {
+  document.getElementById('statusArea').innerHTML = `
+    <div class="status-msg info" style="display:flex;flex-direction:column;gap:8px">
+      <p><strong>Clarification needed:</strong> ${esc(question)}</p>
+      <textarea id="clarificationInput" style="background:var(--bg);color:var(--text);border:1px solid var(--border);
+        border-radius:6px;padding:8px;font-size:0.85em;min-height:40px;resize:vertical;font-family:inherit"
+        placeholder="Your answer..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submitClarification()}"></textarea>
+      <div class="btn-row">
+        <button class="btn" onclick="submitClarification()">Submit</button>
+        <button class="btn btn-secondary" onclick="cancelClarification()">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('clarificationInput').focus();
+}
+
+function submitClarification() {
+  if (!pendingClarification) return;
+  const answer = document.getElementById('clarificationInput').value.trim();
+  if (!answer) return;
+  submitEntry(pendingClarification.role, answer);
+}
+
+function cancelClarification() {
+  pendingClarification = null;
+  document.getElementById('statusArea').innerHTML = '';
+}
+
+async function suggestEntry(role) {
+  const btn = document.getElementById(role === 'strategy' ? 'suggestStratBtn' : 'suggestInstBtn');
+  btn.disabled = true;
+  showStatus(`<span class="spinner"></span> Opus is thinking about a new ${role}... (this may take a minute)`, 'info');
+  try {
+    const r = await api(`/api/problems/${currentProblem}/suggest`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ role }),
+    });
+    if (r.error) throw new Error(r.error);
+    showStatus(`Created ${role} "${esc(r.name)}". Click it to see the description.`, 'info');
+    await refresh();
+  } catch (e) {
+    showStatus(`Error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function evalOne(sid, iid) {
+  showStatus('<span class="spinner"></span> Evaluating...', 'info');
+  try {
+    const r = await api(`/api/problems/${currentProblem}/evaluate`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ strategy_id: sid, instance_id: iid }),
+    });
+    if (r.error) throw new Error(r.error);
+    showStatus(`Done: ${r.summary}`, 'info');
+    await refresh();
+  } catch (e) {
+    showStatus(`Error: ${e.message}`, 'error');
+  }
+}
+
+async function evaluateAll() {
+  showStatus('<span class="spinner"></span> Evaluating all pairs...', 'info');
+  try {
+    await api(`/api/problems/${currentProblem}/evaluate_all`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ force: false }),
+    });
+    showStatus('All evaluations complete.', 'info');
+    await refresh();
+  } catch (e) {
+    showStatus(`Error: ${e.message}`, 'error');
+  }
+}
+
+async function deleteEntry(eid) {
+  await api(`/api/entries/${eid}`, { method: 'DELETE' });
+  await refresh();
+}
+
+function showResult(sid, iid) {
+  const r = results.find(x => x.strategy_id === sid && x.instance_id === iid);
+  const s = strategies.find(x => x.id === sid);
+  const inst = instances.find(x => x.id === iid);
+  if (!r) return;
+  selectedDetail = { result: r, strategy: s, instance: inst };
+  document.getElementById('detailPanel').style.display = 'block';
+  showDetailTab('summary');
+}
+
+async function showEntry(eid) {
+  const e = await api(`/api/entries/${eid}`);
+  if (!e || e.error) return;
+  selectedDetail = { entry: e };
+  document.getElementById('detailPanel').style.display = 'block';
+  showDetailTab('desc');
+}
+
+function showDetailTab(tab) {
+  const tabs = ['desc','summary','chart','stratcode','instcode'];
+  document.querySelectorAll('#detailTabs .tab').forEach((t, i) => {
+    t.classList.toggle('active', tabs[i] === tab);
+  });
+  const el = document.getElementById('detailContent');
+  const d = selectedDetail;
+  if (!d) return;
+
+  if (tab === 'desc') {
+    // Show description(s) for whatever is selected
+    if (d.entry) {
+      const tp = d.entry.tunable_params || {};
+      const pv = d.entry.param_values || {};
+      const paramKeys = Object.keys(tp);
+      const paramHtml = paramKeys.length === 0 ? '' : `
+        <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+          <p style="color:var(--accent);font-size:0.85em;margin-bottom:8px"><strong>Tunable Parameters</strong></p>
+          ${paramKeys.map(name => {
+            const spec = tp[name];
+            const val = pv[name] !== undefined ? pv[name] : spec.default;
+            return `<p style="margin:4px 0;font-size:0.85em;line-height:1.5">
+              <code style="background:var(--bg);padding:2px 5px;border-radius:3px">${esc(name)} = ${val}</code>
+              <span style="color:var(--muted);margin-left:4px">(${spec.type}, ${spec.min}–${spec.max})</span>
+              — ${esc(spec.description)}</p>`;
+          }).join('')}
+        </div>`;
+      el.innerHTML = `
+        <p style="margin-bottom:4px;color:var(--muted);font-size:0.8em">${d.entry.role} — ${esc(d.entry.created_at)}</p>
+        <p><strong>${esc(d.entry.name)}</strong></p>
+        <p style="margin-top:8px;line-height:1.6">${esc(d.entry.description)}</p>
+        ${paramHtml}
+      `;
+    } else if (d.strategy || d.instance) {
+      let html = '';
+      if (d.strategy) html += `<p style="margin-bottom:4px;color:var(--muted);font-size:0.8em">Strategy</p>
+        <p><strong>${esc(d.strategy.name)}</strong></p>
+        <p style="margin-top:4px;line-height:1.6">${esc(d.strategy.description)}</p>`;
+      if (d.strategy && d.instance) html += '<hr style="border-color:var(--border);margin:12px 0">';
+      if (d.instance) html += `<p style="margin-bottom:4px;color:var(--muted);font-size:0.8em">Instance</p>
+        <p><strong>${esc(d.instance.name)}</strong></p>
+        <p style="margin-top:4px;line-height:1.6">${esc(d.instance.description)}</p>`;
+      el.innerHTML = html;
+    } else {
+      el.innerHTML = '<p style="color:var(--muted)">No description available.</p>';
+    }
+  } else if (tab === 'summary' && d.result) {
+    const r = d.result;
+    el.innerHTML = `
+      <p><strong>${esc(d.strategy?.name || '?')}</strong> × <strong>${esc(d.instance?.name || '?')}</strong></p>
+      <p style="margin:8px 0;font-size:1.1em">${esc(r.summary)}</p>
+      <p>Cumulative risk: <strong>${r.metrics.cumulative_risk}</strong></p>
+      <p>Max E_d: ${r.metrics.max_Ed} &nbsp; E_1: ${r.metrics.E1}</p>
+      <p style="margin-top:8px;color:var(--muted)">N=${r.details?.N}, k=${r.details?.k}, samples=${r.details?.num_oracle_samples}</p>
+    `;
+  } else if (tab === 'chart' && d.result?.details?.Ed) {
+    const Ed = d.result.details.Ed;
+    const max = Math.max(...Ed, 0.01);
+    const barW = Math.max(100 / Ed.length, 2);
+    el.innerHTML = `
+      <div style="display:flex;align-items:flex-end;height:180px;gap:1px;padding:8px 0;border-bottom:1px solid var(--border)">
+        ${Ed.map((v, i) => `<div style="flex:1;background:${v > 0 ? 'var(--accent)' : 'var(--border)'};height:${(v/max*160)}px;border-radius:2px 2px 0 0" title="d=${i+1}: E_d=${v.toFixed(5)}"></div>`).join('')}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:0.75em;color:var(--muted);margin-top:4px">
+        <span>d=1</span><span>d=${Ed.length}</span>
+      </div>
+      <p style="margin-top:8px;font-size:0.85em;color:var(--muted)">Cumulative ∑E_d = ${d.result.metrics.cumulative_risk}</p>
+    `;
+  } else if (tab === 'stratcode') {
+    const code = d.result ? d.strategy?.code : d.entry?.code;
+    el.innerHTML = `<pre>${esc(code || 'No code available')}</pre>`;
+  } else if (tab === 'instcode') {
+    const code = d.result ? d.instance?.code : d.entry?.code;
+    el.innerHTML = `<pre>${esc(code || 'No code available')}</pre>`;
+  } else {
+    el.innerHTML = '<p style="color:var(--muted)">Select a result cell to see details.</p>';
+  }
+}
+
+function showStatus(msg, type) {
+  document.getElementById('statusArea').innerHTML = `<div class="status-msg ${type}">${msg}</div>`;
+  if (type !== 'info' || !msg.includes('spinner'))
+    setTimeout(() => { document.getElementById('statusArea').innerHTML = ''; }, 5000);
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+// --- Tunable parameter popover ---
+let paramPopoverTimer = null;
+let currentPopoverEntryId = null;
+
+function showParamPopover(entryId, el) {
+  clearTimeout(paramPopoverTimer);
+  const entry = [...strategies, ...instances].find(e => e.id === entryId);
+  if (!entry) return;
+  const tp = entry.tunable_params || {};
+  const pv = entry.param_values || {};
+  const keys = Object.keys(tp);
+  if (keys.length === 0) return;
+
+  currentPopoverEntryId = entryId;
+  const popover = document.getElementById('paramPopover');
+  popover.innerHTML = `<h4>${esc(entry.name)} — Parameters</h4>` +
+    keys.map(name => {
+      const spec = tp[name];
+      const val = pv[name] !== undefined ? pv[name] : spec.default;
+      return `<div class="param-row">
+        <label title="${esc(spec.description)}">${esc(name)}</label>
+        <input type="number" value="${val}" min="${spec.min}" max="${spec.max}"
+               step="${spec.type === 'float' ? 0.01 : 1}"
+               data-entry="${entryId}" data-param="${name}" data-type="${spec.type}"
+               onchange="saveParam(this)" onclick="event.stopPropagation()">
+        <span class="param-desc">${esc(spec.description)}</span>
+      </div>`;
+    }).join('');
+
+  const rect = el.getBoundingClientRect();
+  popover.style.display = 'block';
+  // Position to the right of the entry, or left if near edge
+  let left = rect.right + 8;
+  if (left + popover.offsetWidth > window.innerWidth - 16) left = rect.left - popover.offsetWidth - 8;
+  let top = rect.top;
+  if (top + popover.offsetHeight > window.innerHeight - 16) top = window.innerHeight - popover.offsetHeight - 16;
+  popover.style.left = Math.max(8, left) + 'px';
+  popover.style.top = Math.max(8, top) + 'px';
+}
+
+function hideParamPopover(delay) {
+  paramPopoverTimer = setTimeout(() => {
+    document.getElementById('paramPopover').style.display = 'none';
+    currentPopoverEntryId = null;
+  }, delay || 200);
+}
+
+function keepParamPopover() {
+  clearTimeout(paramPopoverTimer);
+}
+
+async function saveParam(input) {
+  const entryId = input.dataset.entry;
+  const paramName = input.dataset.param;
+  const type = input.dataset.type;
+  const val = type === 'int' ? parseInt(input.value) : parseFloat(input.value);
+  if (isNaN(val)) return;
+
+  await api(`/api/entries/${entryId}/params`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[paramName]: val})
+  });
+
+  // Update local data so popover stays correct
+  const entry = [...strategies, ...instances].find(e => e.id === entryId);
+  if (entry) {
+    if (!entry.param_values) entry.param_values = {};
+    entry.param_values[paramName] = val;
+  }
+
+  // Refresh results (server invalidated stale results)
+  results = await api(`/api/problems/${currentProblem}/results`);
+  renderMatrix();
+  showStatus(`Updated ${paramName} = ${val}. Re-evaluate to see new results.`, 'info');
+}
+
+init();
+</script>
+</body>
+</html>
