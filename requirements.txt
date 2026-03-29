@@ -1,3 +1,5 @@
 flask
 anthropic
 numpy
+openai
+google-genai

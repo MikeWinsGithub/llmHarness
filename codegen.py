@@ -1,6 +1,7 @@
-"""LLM code generation via Anthropic API."""
+"""LLM code generation via Anthropic, OpenAI, and Google GenAI APIs."""
 
 import os
+import concurrent.futures
 from problems.base import Problem
 
 # In-memory API key override (set via /api/config)
@@ -14,6 +15,14 @@ def set_api_key(key: str):
 
 def get_api_key() -> str | None:
     return _api_key_override or os.environ.get("ANTHROPIC_API_KEY")
+
+
+def get_openai_api_key() -> str | None:
+    return os.environ.get("OPENAI_API_KEY")
+
+
+def get_gemini_api_key() -> str | None:
+    return os.environ.get("GOOGLE_API_KEY")
 
 
 def extract_tunable_params(code: str) -> dict:
@@ -30,7 +39,9 @@ def extract_tunable_params(code: str) -> dict:
         return {}
 
 
-MODEL = "claude-opus-4-6"
+CLAUDE_MODEL = "claude-opus-4-6"
+GPT_MODEL = "gpt-5.4-pro-max"
+GEMINI_MODEL = "gemini-3.1"
 
 
 def _build_context(problem_id: str) -> str:
@@ -114,7 +125,7 @@ def elaborate_description(problem: Problem, role: str, description: str,
 
     client = anthropic.Anthropic(api_key=api_key)
     resp = client.messages.create(
-        model=MODEL,
+        model=CLAUDE_MODEL,
         max_tokens=16000,
         thinking={"type": "enabled", "budget_tokens": 8000},
         system=system,
@@ -127,17 +138,145 @@ def elaborate_description(problem: Problem, role: str, description: str,
     return {"status": "elaborated", "description": text}
 
 
+# ---------------------------------------------------------------------------
+# Multi-model suggestion pipeline
+# ---------------------------------------------------------------------------
+
+def _parse_candidate(text: str) -> dict:
+    """Parse ---NAME---, ---DESCRIPTION---, ---CODE--- sections from model output."""
+    parts = {}
+    for section in ("NAME", "DESCRIPTION", "CODE"):
+        marker = f"---{section}---"
+        if marker not in text:
+            raise ValueError(f"Response missing {marker} section")
+        start = text.index(marker) + len(marker)
+        next_markers = [f"---{s}---" for s in ("NAME", "DESCRIPTION", "CODE") if s != section]
+        end = len(text)
+        for nm in next_markers:
+            if nm in text[start:]:
+                pos = text.index(nm, start)
+                if pos < end:
+                    end = pos
+        parts[section] = text[start:end].strip()
+
+    code = parts["CODE"]
+    if code.startswith("```"):
+        lines = code.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        code = "\n".join(lines)
+
+    return {
+        "name": parts["NAME"],
+        "description": parts["DESCRIPTION"],
+        "code": code,
+    }
+
+
+def _generate_claude(system: str, user_msg: str) -> dict:
+    """Generate a candidate using Claude Opus 4.6 with extended thinking."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=get_api_key())
+    resp = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=32000,
+        thinking={"type": "enabled", "budget_tokens": 20000},
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    text = next(b.text for b in resp.content if b.type == "text")
+    result = _parse_candidate(text)
+    result["model"] = "Claude Opus 4.6"
+    return result
+
+
+def _generate_gpt(system: str, user_msg: str) -> dict:
+    """Generate a candidate using GPT 5.4 Pro Max with high reasoning effort."""
+    from openai import OpenAI
+    client = OpenAI(api_key=get_openai_api_key())
+    resp = client.responses.create(
+        model=GPT_MODEL,
+        instructions=system,
+        input=user_msg,
+        reasoning={"effort": "high", "summary": "auto"},
+    )
+    text = resp.output_text
+    result = _parse_candidate(text)
+    result["model"] = "GPT 5.4 Pro Max"
+    return result
+
+
+def _generate_gemini(system: str, user_msg: str) -> dict:
+    """Generate a candidate using Gemini 3.1 with thinking enabled."""
+    from google import genai
+    client = genai.Client(api_key=get_gemini_api_key())
+    resp = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=user_msg,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=system,
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=20000),
+            max_output_tokens=32000,
+        ),
+    )
+    text = resp.text
+    result = _parse_candidate(text)
+    result["model"] = "Gemini 3.1"
+    return result
+
+
+def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> dict:
+    """Use GPT 5.4 Pro Max to judge which candidate is best."""
+    from openai import OpenAI
+
+    labels = "ABCDEFGHIJ"
+    system = (
+        "You are an expert judge evaluating algorithm proposals for a mathematical research problem. "
+        "You will be shown multiple candidate algorithms. Pick the single best one based on:\n"
+        "1. Mathematical soundness and novelty\n"
+        "2. Code correctness and cleanliness\n"
+        "3. Clear, well-motivated description\n"
+        "4. Likelihood of performing well on the problem\n\n"
+        "Respond with ONLY the letter of the best candidate (e.g. A, B, or C). Nothing else."
+    )
+
+    parts = [f"# Problem\n{problem.name}: {problem.description}\n"]
+    for i, c in enumerate(candidates):
+        parts.append(
+            f"## Candidate {labels[i]} ({c['model']})\n"
+            f"**Name:** {c['name']}\n"
+            f"**Description:** {c['description']}\n"
+            f"```python\n{c['code']}\n```\n"
+        )
+    parts.append(f"Which candidate is best? Respond with only the letter ({', '.join(labels[i] for i in range(len(candidates)))}).")
+
+    client = OpenAI(api_key=get_openai_api_key())
+    resp = client.responses.create(
+        model=GPT_MODEL,
+        instructions=system,
+        input="\n".join(parts),
+        reasoning={"effort": "high", "summary": "auto"},
+    )
+    choice = resp.output_text.strip().upper()
+
+    # Parse the letter
+    for i, label in enumerate(labels[:len(candidates)]):
+        if choice.startswith(label):
+            return candidates[i]
+
+    # Fallback: return first candidate
+    return candidates[0]
+
+
 def suggest_entry(problem: Problem, role: str) -> dict:
-    """Use heavy reasoning to suggest a novel strategy or instance.
+    """Use multiple models with heavy reasoning to suggest a novel strategy or instance.
+
+    Phase 1: Claude, GPT, and Gemini each generate a candidate in parallel.
+    Phase 2: GPT 5.4 Pro Max judges which candidate is best.
 
     Returns {"name": "...", "description": "...", "code": "..."}.
     """
-    import anthropic
-
-    api_key = get_api_key()
-    if not api_key:
-        raise RuntimeError("No Anthropic API key configured.")
-
     spec = problem.strategy_spec() if role == "strategy" else problem.instance_spec()
     context = _build_context(problem.id)
 
@@ -193,55 +332,57 @@ Review the existing strategies and instances above. Look at what works and what 
 
 Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
 
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=32000,
-        thinking={"type": "enabled", "budget_tokens": 20000},
-        system=system,
-        messages=[{"role": "user", "content": user_msg}],
-    )
+    # Phase 1: parallel candidate generation
+    generators = []
+    if get_api_key():
+        generators.append(("Claude", _generate_claude))
+    if get_openai_api_key():
+        generators.append(("GPT", _generate_gpt))
+    if get_gemini_api_key():
+        generators.append(("Gemini", _generate_gemini))
 
-    text = next(b.text for b in resp.content if b.type == "text")
+    if not generators:
+        raise RuntimeError("No API keys configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY in .env.")
 
-    # Parse the three sections
-    parts = {}
-    for section in ("NAME", "DESCRIPTION", "CODE"):
-        marker = f"---{section}---"
-        if marker not in text:
-            raise ValueError(f"Response missing {marker} section")
-        start = text.index(marker) + len(marker)
-        # Find next marker or end
-        next_markers = [f"---{s}---" for s in ("NAME", "DESCRIPTION", "CODE") if s != section]
-        end = len(text)
-        for nm in next_markers:
-            if nm in text[start:]:
-                pos = text.index(nm, start)
-                if pos < end:
-                    end = pos
-        parts[section] = text[start:end].strip()
+    candidates = []
+    errors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(fn, system, user_msg): label
+            for label, fn in generators
+        }
+        for future in concurrent.futures.as_completed(futures):
+            label = futures[future]
+            try:
+                candidates.append(future.result())
+            except Exception as e:
+                errors.append(f"{label}: {e}")
+                print(f"[suggest] {label} generation failed: {e}")
 
-    code = parts["CODE"]
-    # Strip markdown fences if present
-    if code.startswith("```"):
-        lines = code.split("\n")
-        lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        code = "\n".join(lines)
+    if not candidates:
+        raise RuntimeError(f"All model generations failed: {'; '.join(errors)}")
 
-    return {
-        "name": parts["NAME"],
-        "description": parts["DESCRIPTION"],
-        "code": code,
-    }
+    # Phase 2: judge picks the best (skip if only 1 candidate)
+    if len(candidates) == 1:
+        winner = candidates[0]
+    elif get_openai_api_key():
+        try:
+            winner = _judge_candidates(candidates, problem, role)
+        except Exception as e:
+            print(f"[suggest] Judge failed, using first candidate: {e}")
+            winner = candidates[0]
+    else:
+        # No OpenAI key for judging — just return first candidate
+        winner = candidates[0]
+
+    return {"name": winner["name"], "description": winner["description"], "code": winner["code"]}
 
 
 def generate_code(problem: Problem, role: str, description: str, model: str | None = None) -> str:
     """Generate strategy or instance code from a natural-language description."""
     import anthropic
 
-    model = model or MODEL
+    model = model or CLAUDE_MODEL
     api_key = get_api_key()
     if not api_key:
         raise RuntimeError(
