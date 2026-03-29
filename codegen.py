@@ -380,7 +380,17 @@ Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
         # No Anthropic key for judging — just return first candidate
         winner = candidates[0]
 
-    return {"name": winner["name"], "description": winner["description"], "code": winner["code"]}
+    # Build debug info with all candidates
+    debug = {
+        "candidates": [
+            {"model": c["model"], "name": c["name"], "description": c["description"], "code": c["code"],
+             "winner": (c is winner)}
+            for c in candidates
+        ],
+        "errors": errors,
+    }
+
+    return {"name": winner["name"], "description": winner["description"], "code": winner["code"], "debug": debug}
 
 
 def generate_code(problem: Problem, role: str, description: str, model: str | None = None) -> str:

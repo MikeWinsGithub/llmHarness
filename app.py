@@ -262,7 +262,7 @@ def suggest(pid):
     entry = storage.make_entry(pid, role, result["name"], result["description"], code, tunable_params)
     storage.save_entry(entry)
 
-    return jsonify({
+    resp = {
         "id": entry.id,
         "name": entry.name,
         "description": entry.description,
@@ -270,7 +270,10 @@ def suggest(pid):
         "role": entry.role,
         "tunable_params": entry.tunable_params,
         "param_values": entry.param_values,
-    })
+    }
+    if "debug" in result:
+        resp["debug"] = result["debug"]
+    return jsonify(resp)
 
 
 @app.route("/api/entries/<eid>/params", methods=["PATCH"])
