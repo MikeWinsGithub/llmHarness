@@ -178,14 +178,16 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     """Generate a candidate using Claude Opus 4.6 with extended thinking."""
     import anthropic
     client = anthropic.Anthropic(api_key=get_api_key())
-    resp = client.messages.create(
+    # Use streaming to avoid 10-minute timeout on large thinking budgets
+    text_parts = []
+    with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=128000,
-        thinking={"type": "adaptive", "effort": "max"},
+        thinking={"type": "enabled", "budget_tokens": 100000},
         system=system,
         messages=[{"role": "user", "content": user_msg}],
-        stream=False,
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     text = next(b.text for b in resp.content if b.type == "text")
     result = _parse_candidate(text)
     result["model"] = "Claude Opus 4.6"
@@ -218,7 +220,7 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
         contents=user_msg,
         config=genai.types.GenerateContentConfig(
             system_instruction=system,
-            thinking_config=genai.types.ThinkingConfig(thinking_level="MAX"),
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=24576),
             max_output_tokens=65536,
         ),
     )
@@ -257,7 +259,7 @@ def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> di
     resp = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=1024,
-        thinking={"type": "adaptive", "effort": "max"},
+        thinking={"type": "enabled", "budget_tokens": 100000},
         system=system,
         messages=[{"role": "user", "content": "\n".join(parts)}],
     )
