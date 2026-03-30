@@ -542,5 +542,154 @@
     },
     "conjecture_holds": true,
     "timestamp": 1774838058.7351453
+  },
+  {
+    "problem_id": "oracle_averaging",
+    "strategy_id": "07d3977a",
+    "instance_id": "fdd50cdf",
+    "metrics": {
+      "cumulative_risk": 0.073142,
+      "max_Ed": 0.004001,
+      "E1": 0.00387
+    },
+    "summary": "\u2211E_d = 0.0731 (\u2264 1 \u2713)",
+    "details": {
+      "Ed": [
+        0.0038702392578125,
+        0.00381103515625,
+        0.00367584228515625,
+        0.00378448486328125,
+        0.003946533203125,
+        0.0039398193359375,
+        0.00369598388671875,
+        0.00384429931640625,
+        0.00383544921875,
+        0.00400146484375,
+        0.00335235595703125,
+        0.00364013671875,
+        0.00356903076171875,
+        0.0030859375,
+        0.00353271484375,
+        0.0033538818359375,
+        0.00379150390625,
+        0.00383026123046875,
+        0.00355377197265625,
+        0.00302703857421875
+      ],
+      "N": 8,
+      "k": 4,
+      "num_oracle_samples": 50,
+      "trials_completed": 50
+    },
+    "conjecture_holds": true,
+    "timestamp": 1774838355.1261036
+  },
+  {
+    "problem_id": "oracle_averaging",
+    "strategy_id": "07d3977a",
+    "instance_id": "9ea2790c",
+    "metrics": {
+      "cumulative_risk": 0.623169,
+      "max_Ed": 0.186494,
+      "E1": 0.186494
+    },
+    "summary": "\u2211E_d = 0.6232 (\u2264 1 \u2713)",
+    "details": {
+      "Ed": [
+        0.186494140625,
+        0.16640625,
+        0.1088525390625,
+        0.0643212890625,
+        0.0612548828125,
+        0.02642578125,
+        0.0094140625,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "N": 8,
+      "k": 4,
+      "num_oracle_samples": 50,
+      "trials_completed": 50
+    },
+    "conjecture_holds": true,
+    "timestamp": 1774838365.2527869
+  },
+  {
+    "problem_id": "oracle_averaging",
+    "strategy_id": "07d3977a",
+    "instance_id": "eebbbedf",
+    "metrics": {
+      "cumulative_risk": 0.0,
+      "max_Ed": 0.0,
+      "E1": 0.0
+    },
+    "summary": "\u2211E_d = 0.0000 (\u2264 1 \u2713) (max_d=5, k=481)",
+    "details": {
+      "Ed": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "N": 8,
+      "k": 481,
+      "num_oracle_samples": 5,
+      "trials_completed": 5
+    },
+    "conjecture_holds": true,
+    "timestamp": 1774838386.4206388
+  },
+  {
+    "problem_id": "oracle_averaging",
+    "strategy_id": "07d3977a",
+    "instance_id": "5dd882a1",
+    "metrics": {
+      "cumulative_risk": 0.486738,
+      "max_Ed": 0.291885,
+      "E1": 0.291885
+    },
+    "summary": "\u2211E_d = 0.4867 (\u2264 1 \u2713)",
+    "details": {
+      "Ed": [
+        0.291884765625,
+        0.1259423828125,
+        0.0416259765625,
+        0.02400390625,
+        0.00328125,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "N": 8,
+      "k": 4,
+      "num_oracle_samples": 50,
+      "trials_completed": 50
+    },
+    "conjecture_holds": true,
+    "timestamp": 1774838393.0634584
   }
 ]
