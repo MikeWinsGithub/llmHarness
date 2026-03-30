@@ -420,8 +420,7 @@ function pollJob(jobId, eventsSeen, handler, onDone) {
 async function suggestEntry(role) {
   const btn = document.getElementById(role === 'strategy' ? 'suggestStratBtn' : 'suggestInstBtn');
   btn.disabled = true;
-  const debugEl = document.getElementById('suggestDebug');
-  debugEl.innerHTML = '<div class="suggest-debug"><h3>Suggestion Pipeline</h3><div id="suggestPipelineStatus"><span class="spinner"></span> Starting models...</div><div id="suggestCandidates"></div><div id="suggestJudge"></div><div id="suggestErrors"></div></div>';
+  _setupSuggestDebugPanel('<span class="spinner"></span> Starting models...');
   showStatus(`<span class="spinner"></span> Models are thinking about a new ${role}...`, 'info');
 
   try {
@@ -558,30 +557,25 @@ function makeEvalHandler(sid, iid) {
 // Resume any active jobs on page load
 async function resumeJobs() {
   try {
-    const running = await api('/api/jobs');
-    if (!Array.isArray(running)) return;
-    for (const job of running) {
+    const allJobs = await api('/api/jobs');
+    if (!Array.isArray(allJobs)) return;
+
+    // Resume running jobs
+    for (const job of allJobs.filter(j => j.status === 'running')) {
       if (job.type === 'suggest') {
         const role = job.params?.role || 'instance';
-        const debugEl = document.getElementById('suggestDebug');
-        if (debugEl) {
-          debugEl.innerHTML = '<div class="suggest-debug"><h3>Suggestion Pipeline</h3><div id="suggestPipelineStatus"><span class="spinner"></span> Resuming...</div><div id="suggestCandidates"></div><div id="suggestJudge"></div><div id="suggestErrors"></div></div>';
-        }
+        _setupSuggestDebugPanel('Resuming...');
         const handler = makeSuggestHandler(role, null);
-        // Replay all existing events then continue polling
         const full = await api(`/api/jobs/${job.id}`);
         let seen = 0;
         for (const evt of (full.events || [])) { handler(evt); seen++; }
-        if (full.status === 'running') {
-          pollJob(job.id, seen, handler);
-        }
+        pollJob(job.id, seen, handler);
       }
       else if (job.type === 'evaluate') {
         const sid = job.params?.strategy_id;
         const iid = job.params?.instance_id;
         if (!sid || !iid) continue;
-        const cellId = `cell-${sid}-${iid}`;
-        const cell = document.getElementById(cellId);
+        const cell = document.getElementById(`cell-${sid}-${iid}`);
         if (cell) {
           cell.className = 'evaluating';
           cell.innerHTML = `<div class="cell-progress-text">resuming...</div><div class="cell-progress"><div class="cell-progress-bar" style="width:0%"></div></div>`;
@@ -590,12 +584,28 @@ async function resumeJobs() {
         const full = await api(`/api/jobs/${job.id}`);
         let seen = 0;
         for (const evt of (full.events || [])) { handler(evt); seen++; }
-        if (full.status === 'running') {
-          pollJob(job.id, seen, handler);
-        }
+        pollJob(job.id, seen, handler);
       }
     }
+
+    // Show most recent completed suggest job (so you can see results after refresh)
+    const recentSuggest = allJobs.find(j => j.type === 'suggest' && j.status !== 'running');
+    if (recentSuggest) {
+      const role = recentSuggest.params?.role || 'instance';
+      _setupSuggestDebugPanel('Last suggestion run:');
+      const handler = makeSuggestHandler(role, null);
+      const full = await api(`/api/jobs/${recentSuggest.id}`);
+      for (const evt of (full.events || [])) { handler(evt); }
+      if (full.result) handler(full.result);
+    }
   } catch (e) { console.error('resumeJobs:', e); }
+}
+
+function _setupSuggestDebugPanel(statusText) {
+  const debugEl = document.getElementById('suggestDebug');
+  if (debugEl) {
+    debugEl.innerHTML = `<div class="suggest-debug"><h3>Suggestion Pipeline</h3><div id="suggestPipelineStatus">${statusText}</div><div id="suggestCandidates"></div><div id="suggestJudge"></div><div id="suggestErrors"></div></div>`;
+  }
 }
 
 async function evaluateAll() {

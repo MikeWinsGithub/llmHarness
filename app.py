@@ -549,8 +549,12 @@ def get_job(job_id):
 
 @app.route("/api/jobs")
 def list_jobs():
-    """List running jobs."""
-    return jsonify(jobs.list_running())
+    """List running and recent jobs."""
+    status_filter = request.args.get("status")
+    job_type = request.args.get("type")
+    if status_filter == "running":
+        return jsonify(jobs.list_running())
+    return jsonify(jobs.list_recent(job_type=job_type, limit=10))
 
 
 if __name__ == "__main__":

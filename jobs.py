@@ -87,6 +87,16 @@ def list_running():
         return [dict(j) for j in _jobs.values() if j["status"] == "running"]
 
 
+def list_recent(job_type=None, limit=5):
+    """List recent jobs, newest first."""
+    with _lock:
+        jobs_list = list(_jobs.values())
+    if job_type:
+        jobs_list = [j for j in jobs_list if j["type"] == job_type]
+    jobs_list.sort(key=lambda j: j.get("created_at", 0), reverse=True)
+    return [dict(j) for j in jobs_list[:limit]]
+
+
 def load_all():
     """Load all jobs from disk on startup. Mark stale running jobs as errors."""
     with _lock:
