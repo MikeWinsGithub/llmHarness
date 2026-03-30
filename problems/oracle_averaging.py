@@ -163,6 +163,18 @@ def run_evaluation(
     except Exception:
         pass  # fall back to caller-supplied k
 
+    # Auto-scale for expensive (high-k) instances to avoid timeouts.
+    # Each trial runs max_d stages, each with budget=d*k queries. High k makes this very slow.
+    if k > 20:
+        # Scale down trials proportional to cost
+        scaled_trials = max(5, num_oracle_samples * 20 // k)
+        if scaled_trials < num_oracle_samples:
+            num_oracle_samples = scaled_trials
+        # Also cap max_d: diminishing returns for high-k on late stages
+        scaled_d = max(5, max_d * 20 // k)
+        if scaled_d < max_d:
+            max_d = scaled_d
+
     import time as _time
 
     rng = np.random.default_rng(seed)
