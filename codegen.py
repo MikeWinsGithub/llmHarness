@@ -178,16 +178,13 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     """Generate a candidate using Claude Opus 4.6 with extended thinking."""
     import anthropic
     client = anthropic.Anthropic(api_key=get_api_key())
-    # Use streaming to avoid 10-minute timeout on large thinking budgets
-    text_parts = []
-    with client.messages.stream(
+    resp = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=128000,
-        thinking={"type": "enabled", "budget_tokens": 100000},
+        max_tokens=16000,
+        thinking={"type": "enabled", "budget_tokens": 5000},
         system=system,
         messages=[{"role": "user", "content": user_msg}],
-    ) as stream:
-        resp = stream.get_final_message()
+    )
     text = next(b.text for b in resp.content if b.type == "text")
     result = _parse_candidate(text)
     result["model"] = "Claude Opus 4.6"
@@ -195,15 +192,15 @@ def _generate_claude(system: str, user_msg: str) -> dict:
 
 
 def _generate_gpt(system: str, user_msg: str) -> dict:
-    """Generate a candidate using GPT 5.4 Pro Max with high reasoning effort."""
+    """Generate a candidate using GPT 5.4 Pro with reasoning."""
     from openai import OpenAI
     client = OpenAI(api_key=get_openai_api_key())
     resp = client.responses.create(
         model=GPT_MODEL,
         instructions=system,
         input=user_msg,
-        max_output_tokens=128000,
-        reasoning={"effort": "xhigh", "summary": "auto"},
+        max_output_tokens=16000,
+        reasoning={"effort": "medium", "summary": "auto"},
     )
     text = resp.output_text
     result = _parse_candidate(text)
@@ -220,8 +217,8 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
         contents=user_msg,
         config=genai.types.GenerateContentConfig(
             system_instruction=system,
-            thinking_config=genai.types.ThinkingConfig(thinking_budget=24576),
-            max_output_tokens=65536,
+            thinking_config=genai.types.ThinkingConfig(thinking_budget=5000),
+            max_output_tokens=16000,
         ),
     )
     text = resp.text
