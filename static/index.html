@@ -453,9 +453,16 @@ function makeSuggestHandler(role, btn) {
     }
     else if (msg.type === 'candidate') {
       statusEl.innerHTML = `<span class="spinner"></span> Models still thinking...`;
+      const t = msg.timing || {};
+      const timingStr = [
+        t.elapsed_s != null ? `${t.elapsed_s}s` : null,
+        t.input_tokens != null ? `${t.input_tokens} in` : null,
+        t.output_tokens != null ? `${t.output_tokens} out` : null,
+      ].filter(Boolean).join(' · ');
       candidatesEl.innerHTML += `
         <div class="candidate-card">
           <span class="model-tag">${esc(msg.model)}</span>
+          ${timingStr ? `<span style="font-size:0.75em;color:var(--muted);margin-left:8px">${timingStr}</span>` : ''}
           <h4>${esc(msg.name)}</h4>
           <div class="desc">${esc(msg.description)}</div>
           <details><summary>Show code</summary><pre>${esc(msg.code)}</pre></details>

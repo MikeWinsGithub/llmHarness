@@ -182,9 +182,10 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     """Generate a candidate using Claude Opus 4.6 with extended thinking."""
     if DEBUG_MODE:
         import time; time.sleep(2)
-        return {"name": "Claude Test Instance", "description": "A test instance from Claude.", "code": 'def oracle_algorithm(x, query):\n    return float(query(0))\n', "model": "Claude Opus 4.6"}
-    import anthropic
+        return {"name": "Claude Test Instance", "description": "A test instance from Claude.", "code": 'def oracle_algorithm(x, query):\n    return float(query(0))\n', "model": "Claude Opus 4.6", "timing": {"elapsed_s": 2, "input_tokens": 0, "output_tokens": 0}}
+    import anthropic, time
     client = anthropic.Anthropic(api_key=get_api_key())
+    t0 = time.monotonic()
     resp = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=32000,
@@ -192,9 +193,15 @@ def _generate_claude(system: str, user_msg: str) -> dict:
         system=system,
         messages=[{"role": "user", "content": user_msg}],
     )
+    elapsed = round(time.monotonic() - t0, 1)
     text = next(b.text for b in resp.content if b.type == "text")
     result = _parse_candidate(text)
     result["model"] = "Claude Opus 4.6"
+    result["timing"] = {
+        "elapsed_s": elapsed,
+        "input_tokens": getattr(resp.usage, 'input_tokens', None),
+        "output_tokens": getattr(resp.usage, 'output_tokens', None),
+    }
     return result
 
 
@@ -202,9 +209,11 @@ def _generate_gpt(system: str, user_msg: str) -> dict:
     """Generate a candidate using GPT 5.4 Pro with reasoning."""
     if DEBUG_MODE:
         import time; time.sleep(4)
-        return {"name": "GPT Test Instance", "description": "A test instance from GPT.", "code": 'def oracle_algorithm(x, query):\n    return float(query(1))\n', "model": "GPT 5.4 Pro"}
+        return {"name": "GPT Test Instance", "description": "A test instance from GPT.", "code": 'def oracle_algorithm(x, query):\n    return float(query(1))\n', "model": "GPT 5.4 Pro", "timing": {"elapsed_s": 4, "input_tokens": 0, "output_tokens": 0}}
     from openai import OpenAI
+    import time
     client = OpenAI(api_key=get_openai_api_key())
+    t0 = time.monotonic()
     resp = client.responses.create(
         model=GPT_MODEL,
         instructions=system,
@@ -212,9 +221,15 @@ def _generate_gpt(system: str, user_msg: str) -> dict:
         max_output_tokens=32000,
         reasoning={"effort": "high", "summary": "auto"},
     )
+    elapsed = round(time.monotonic() - t0, 1)
     text = resp.output_text
     result = _parse_candidate(text)
     result["model"] = "GPT 5.4 Pro"
+    result["timing"] = {
+        "elapsed_s": elapsed,
+        "input_tokens": getattr(resp.usage, 'input_tokens', None),
+        "output_tokens": getattr(resp.usage, 'output_tokens', None),
+    }
     return result
 
 
@@ -222,9 +237,11 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
     """Generate a candidate using Gemini 3.1 with thinking enabled."""
     if DEBUG_MODE:
         import time; time.sleep(3)
-        return {"name": "Gemini Test Instance", "description": "A test instance from Gemini.", "code": 'def oracle_algorithm(x, query):\n    return float(query(2))\n', "model": "Gemini 3.1"}
+        return {"name": "Gemini Test Instance", "description": "A test instance from Gemini.", "code": 'def oracle_algorithm(x, query):\n    return float(query(2))\n', "model": "Gemini 3.1", "timing": {"elapsed_s": 3, "input_tokens": 0, "output_tokens": 0}}
     from google import genai
+    import time
     client = genai.Client(api_key=get_gemini_api_key())
+    t0 = time.monotonic()
     resp = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=user_msg,
@@ -234,9 +251,16 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
             max_output_tokens=32000,
         ),
     )
+    elapsed = round(time.monotonic() - t0, 1)
     text = resp.text
     result = _parse_candidate(text)
     result["model"] = "Gemini 3.1"
+    usage = getattr(resp, 'usage_metadata', None)
+    result["timing"] = {
+        "elapsed_s": elapsed,
+        "input_tokens": getattr(usage, 'prompt_token_count', None) if usage else None,
+        "output_tokens": getattr(usage, 'candidates_token_count', None) if usage else None,
+    }
     return result
 
 
@@ -505,6 +529,7 @@ Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
                     "name": result["name"],
                     "description": result["description"],
                     "code": result["code"],
+                    "timing": result.get("timing"),
                 })
             except Exception as e:
                 error_msg = str(e)
