@@ -393,6 +393,137 @@ Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
     return {"name": winner["name"], "description": winner["description"], "code": winner["code"], "debug": debug}
 
 
+def suggest_entry_streaming(problem: Problem, role: str, event_queue) -> dict:
+    """Like suggest_entry, but pushes SSE events to event_queue as each step completes.
+
+    Events pushed:
+      {"type": "started", "models": [...]}
+      {"type": "candidate", "model": ..., "name": ..., "description": ..., "code": ...}
+      {"type": "model_error", "model": ..., "error": ...}
+      {"type": "judging"}
+      {"type": "winner", "model": ..., "name": ...}
+      {"type": "done", ...}  (final result with entry data)
+      {"type": "error", "error": ...}
+    """
+    spec = problem.strategy_spec() if role == "strategy" else problem.instance_spec()
+    context = _build_context(problem.id)
+
+    if role == "strategy":
+        task = (
+            "Suggest a novel estimation STRATEGY that could perform better than the existing ones. "
+            "Think deeply about the mathematical structure of the problem. Consider approaches from "
+            "Bayesian estimation, information theory, adaptive sampling, importance weighting, or "
+            "any other technique that could reduce the cumulative Bayes risk. The strategy should "
+            "be meaningfully different from existing strategies — not a minor tweak."
+        )
+    else:
+        task = (
+            "Suggest a novel oracle algorithm INSTANCE that could stress-test the conjecture. "
+            "Think deeply about what makes estimation hard. Consider instances with complex "
+            "adaptive query patterns, high-degree Fourier structure, information-hiding schemes, "
+            "or structural features that could push the cumulative risk close to or above 1. "
+            "The instance should be meaningfully different from existing instances."
+        )
+
+    system = (
+        "You are a world-class mathematician and algorithm designer working on the "
+        "Oracle-Averaging Conjecture. Your task is to propose a novel, creative, and "
+        "mathematically well-motivated algorithm.\n\n"
+        "You MUST respond in EXACTLY this format — three sections separated by the exact "
+        "delimiters shown:\n\n"
+        "---NAME---\n"
+        "A short name for the algorithm\n"
+        "---DESCRIPTION---\n"
+        "A detailed paragraph explaining the algorithm, its mathematical motivation, "
+        "why it should work well, and what its parameters control.\n"
+        "---CODE---\n"
+        "The complete Python code implementing the algorithm.\n\n"
+        "The code must follow the specification below. numpy is available as np. "
+        "If the implementation has tunable parameters, define TUNABLE_PARAMS and params "
+        "at the top of the code."
+    )
+
+    user_msg = f"""\
+# Problem
+{problem.name}: {problem.description}
+
+# Code specification
+{spec}
+
+{context}
+
+# Results summary
+Review the existing strategies and instances above. Look at what works and what doesn't.
+
+# Your task
+{task}
+
+Respond with ---NAME---, ---DESCRIPTION---, and ---CODE--- sections."""
+
+    generators = []
+    if get_api_key():
+        generators.append(("Claude", _generate_claude))
+    if get_openai_api_key():
+        generators.append(("GPT", _generate_gpt))
+    if get_gemini_api_key():
+        generators.append(("Gemini", _generate_gemini))
+
+    if not generators:
+        raise RuntimeError("No API keys configured.")
+
+    model_names = [label for label, _ in generators]
+    event_queue.put({"type": "started", "models": model_names})
+
+    candidates = []
+    errors = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            executor.submit(fn, system, user_msg): label
+            for label, fn in generators
+        }
+        for future in concurrent.futures.as_completed(futures):
+            label = futures[future]
+            try:
+                result = future.result()
+                candidates.append(result)
+                event_queue.put({
+                    "type": "candidate",
+                    "model": result["model"],
+                    "name": result["name"],
+                    "description": result["description"],
+                    "code": result["code"],
+                })
+            except Exception as e:
+                error_msg = str(e)
+                errors.append(f"{label}: {error_msg}")
+                event_queue.put({"type": "model_error", "model": label, "error": error_msg})
+
+    if not candidates:
+        raise RuntimeError(f"All model generations failed: {'; '.join(errors)}")
+
+    # Phase 2: judge
+    if len(candidates) == 1:
+        winner = candidates[0]
+        event_queue.put({"type": "winner", "model": winner["model"], "name": winner["name"],
+                         "reason": "Only one candidate"})
+    elif get_api_key():
+        event_queue.put({"type": "judging"})
+        try:
+            winner = _judge_candidates(candidates, problem, role)
+            event_queue.put({"type": "winner", "model": winner["model"], "name": winner["name"],
+                             "reason": "Selected by Claude judge"})
+        except Exception as e:
+            winner = candidates[0]
+            event_queue.put({"type": "winner", "model": winner["model"], "name": winner["name"],
+                             "reason": f"Judge failed ({e}), using first candidate"})
+    else:
+        winner = candidates[0]
+        event_queue.put({"type": "winner", "model": winner["model"], "name": winner["name"],
+                         "reason": "No judge available"})
+
+    return {"name": winner["name"], "description": winner["description"], "code": winner["code"]}
+
+
 def generate_code(problem: Problem, role: str, description: str, model: str | None = None) -> str:
     """Generate strategy or instance code from a natural-language description."""
     import anthropic

@@ -343,6 +343,57 @@ def suggest(pid):
     return jsonify(resp)
 
 
+@app.route("/api/problems/<pid>/suggest_stream", methods=["POST"])
+def suggest_stream(pid):
+    """Suggest with Server-Sent Events for live progress."""
+    problem = PROBLEMS.get(pid)
+    if not problem:
+        return jsonify({"error": f"Unknown problem: {pid}"}), 404
+
+    role = (request.json or {}).get("role")
+    if role not in ("strategy", "instance"):
+        return jsonify({"error": "role must be 'strategy' or 'instance'"}), 400
+
+    q = queue.Queue()
+
+    def run():
+        try:
+            result = codegen.suggest_entry_streaming(problem, role, q)
+            code = result["code"]
+            tunable_params = codegen.extract_tunable_params(code)
+            entry = storage.make_entry(pid, role, result["name"], result["description"], code, tunable_params)
+            storage.save_entry(entry)
+            q.put({
+                "type": "done",
+                "id": entry.id,
+                "name": entry.name,
+                "description": entry.description,
+                "code": entry.code,
+                "role": entry.role,
+                "tunable_params": entry.tunable_params,
+                "param_values": entry.param_values,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            q.put({"type": "error", "error": str(e)})
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=700)
+            except queue.Empty:
+                yield f"data: {_json.dumps({'type': 'error', 'error': 'Timed out'})}\n\n"
+                return
+            yield f"data: {_json.dumps(msg)}\n\n"
+            if msg["type"] in ("done", "error"):
+                return
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
 @app.route("/api/entries/<eid>/params", methods=["PATCH"])
 def update_params(eid):
     """Update tunable parameter values for an entry."""

@@ -392,18 +392,39 @@ function cancelClarification() {
 async function suggestEntry(role) {
   const btn = document.getElementById(role === 'strategy' ? 'suggestStratBtn' : 'suggestInstBtn');
   btn.disabled = true;
-  document.getElementById('suggestDebug').innerHTML = '';
-  showStatus(`<span class="spinner"></span> Multiple models are thinking about a new ${role}... (this may take several minutes)`, 'info');
+  const debugEl = document.getElementById('suggestDebug');
+  debugEl.innerHTML = '<div class="suggest-debug"><h3>Suggestion Pipeline</h3><div id="suggestPipelineStatus"><span class="spinner"></span> Starting models...</div><div id="suggestCandidates"></div><div id="suggestJudge"></div><div id="suggestErrors"></div></div>';
+  showStatus(`<span class="spinner"></span> Models are thinking about a new ${role}...`, 'info');
+
   try {
-    const r = await api(`/api/problems/${currentProblem}/suggest`, {
+    const resp = await fetch(`${API}/api/problems/${currentProblem}/suggest_stream`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ role }),
     });
-    if (r.error) throw new Error(r.error);
-    showStatus(`Created ${role} "${esc(r.name)}". Click it to see the description.`, 'info');
-    if (r.debug) renderSuggestDebug(r.debug);
-    await refresh();
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const msg = JSON.parse(line.slice(6));
+        handleSuggestEvent(msg, role);
+        if (msg.type === 'done' || msg.type === 'error') {
+          btn.disabled = false;
+          return;
+        }
+      }
+    }
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
   } finally {
@@ -411,24 +432,53 @@ async function suggestEntry(role) {
   }
 }
 
-function renderSuggestDebug(debug) {
-  const el = document.getElementById('suggestDebug');
-  let html = '<div class="suggest-debug"><h3>Suggestion Pipeline Results</h3>';
-  for (const c of (debug.candidates || [])) {
-    const isWinner = c.winner;
-    html += `<div class="candidate-card ${isWinner ? 'winner' : ''}">`;
-    html += `<span class="model-tag">${esc(c.model)}</span>`;
-    if (isWinner) html += `<span class="model-tag winner-tag">WINNER</span>`;
-    html += `<h4>${esc(c.name)}</h4>`;
-    html += `<div class="desc">${esc(c.description)}</div>`;
-    html += `<details><summary>Show code</summary><pre>${esc(c.code)}</pre></details>`;
-    html += `</div>`;
+function handleSuggestEvent(msg, role) {
+  const statusEl = document.getElementById('suggestPipelineStatus');
+  const candidatesEl = document.getElementById('suggestCandidates');
+  const judgeEl = document.getElementById('suggestJudge');
+  const errorsEl = document.getElementById('suggestErrors');
+
+  if (msg.type === 'started') {
+    statusEl.innerHTML = `<span class="spinner"></span> Waiting for: ${msg.models.join(', ')}`;
   }
-  if (debug.errors && debug.errors.length) {
-    html += `<div class="suggest-errors"><strong>Errors:</strong> ${debug.errors.map(esc).join('; ')}</div>`;
+  else if (msg.type === 'candidate') {
+    statusEl.innerHTML = `<span class="spinner"></span> Models still thinking...`;
+    candidatesEl.innerHTML += `
+      <div class="candidate-card">
+        <span class="model-tag">${esc(msg.model)}</span>
+        <h4>${esc(msg.name)}</h4>
+        <div class="desc">${esc(msg.description)}</div>
+        <details><summary>Show code</summary><pre>${esc(msg.code)}</pre></details>
+      </div>`;
   }
-  html += '</div>';
-  el.innerHTML = html;
+  else if (msg.type === 'model_error') {
+    errorsEl.innerHTML += `<div class="suggest-errors">${esc(msg.model)} failed: ${esc(msg.error)}</div>`;
+  }
+  else if (msg.type === 'judging') {
+    statusEl.innerHTML = `<span class="spinner"></span> All candidates in. Claude is judging...`;
+  }
+  else if (msg.type === 'winner') {
+    judgeEl.innerHTML = `<div style="margin:12px 0;padding:10px;background:rgba(63,185,80,0.1);border:1px solid var(--green);border-radius:6px">
+      <strong>Winner:</strong> "${esc(msg.name)}" by ${esc(msg.model)} — ${esc(msg.reason)}</div>`;
+    // Highlight the winning card
+    const cards = document.querySelectorAll('#suggestCandidates .candidate-card');
+    cards.forEach(card => {
+      if (card.querySelector('.model-tag')?.textContent === msg.model) {
+        card.classList.add('winner');
+        card.querySelector('.model-tag').insertAdjacentHTML('afterend',
+          ' <span class="model-tag winner-tag">WINNER</span>');
+      }
+    });
+  }
+  else if (msg.type === 'done') {
+    statusEl.innerHTML = `Done! Created ${msg.role} "${esc(msg.name)}".`;
+    showStatus(`Created ${msg.role} "${esc(msg.name)}". Click it to see the description.`, 'info');
+    refresh();
+  }
+  else if (msg.type === 'error') {
+    statusEl.innerHTML = `Failed.`;
+    showStatus(`Error: ${msg.error}`, 'error');
+  }
 }
 
 async function evalOneStream(sid, iid) {
