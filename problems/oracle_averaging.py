@@ -105,6 +105,7 @@ def run_evaluation(
     strategy_params: dict | None = None,
     instance_params: dict | None = None,
     timeout: int = 600,
+    progress_callback=None,
 ) -> EvalResult:
     """Evaluate a strategy on an instance.
 
@@ -202,6 +203,8 @@ def run_evaluation(
                 Ed_accum[d_idx] += (mu_hat - F_true) ** 2
 
             trials_completed += 1
+            if progress_callback:
+                progress_callback(trials_completed, num_oracle_samples)
     except _EvalTimeout:
         pass
     finally:
@@ -314,10 +317,12 @@ numpy is available as np.
 '''
 
     def evaluate(self, strategy_code: str, instance_code: str, params: dict | None = None,
-                 strategy_params: dict | None = None, instance_params: dict | None = None) -> EvalResult:
+                 strategy_params: dict | None = None, instance_params: dict | None = None,
+                 progress_callback=None) -> EvalResult:
         p = {**self.default_params(), **(params or {})}
         return run_evaluation(strategy_code, instance_code, **p,
-                              strategy_params=strategy_params, instance_params=instance_params)
+                              strategy_params=strategy_params, instance_params=instance_params,
+                              progress_callback=progress_callback)
 
     def default_params(self) -> dict:
         return {"N": 8, "k": 4, "max_d": 20, "num_oracle_samples": 50, "seed": 42}

@@ -59,6 +59,10 @@
   td.pass { background: rgba(63,185,80,0.12); color: var(--green); }
   td.fail { background: rgba(248,81,73,0.12); color: var(--red); }
   td.pending { color: var(--muted); font-style: italic; }
+  td.evaluating { padding: 4px 6px; position: relative; }
+  .cell-progress { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 2px; }
+  .cell-progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s ease; }
+  .cell-progress-text { font-size: 0.75em; color: var(--muted); }
   td.error { background: rgba(210,153,34,0.12); color: var(--yellow); }
   td { cursor: pointer; }
   td:hover { outline: 1px solid var(--accent); }
@@ -295,13 +299,14 @@ function renderMatrix() {
     instances.forEach(inst => {
       const key = s.id + '|' + inst.id;
       const r = resultMap[key];
+      const cellId = `cell-${s.id}-${inst.id}`;
       if (!r) {
-        html += `<td class="pending" onclick="evalOne('${s.id}','${inst.id}')">—</td>`;
+        html += `<td class="pending" id="${cellId}" onclick="evalOneStream('${s.id}','${inst.id}')">—</td>`;
       } else if (r.error) {
-        html += `<td class="error" onclick="showResult('${s.id}','${inst.id}')" title="${esc(r.error)}">err</td>`;
+        html += `<td class="error" id="${cellId}" onclick="evalOneStream('${s.id}','${inst.id}')" title="${esc(r.error)}">err</td>`;
       } else {
         const cls = r.conjecture_holds ? 'pass' : 'fail';
-        html += `<td class="${cls}" onclick="showResult('${s.id}','${inst.id}')">${r.metrics.cumulative_risk.toFixed(3)}</td>`;
+        html += `<td class="${cls}" id="${cellId}" onclick="evalOneStream('${s.id}','${inst.id}')">${r.metrics.cumulative_risk.toFixed(3)}</td>`;
       }
     });
     html += '</tr>';
@@ -426,19 +431,57 @@ function renderSuggestDebug(debug) {
   el.innerHTML = html;
 }
 
-async function evalOne(sid, iid) {
+async function evalOneStream(sid, iid) {
+  const cellId = `cell-${sid}-${iid}`;
+  const cell = document.getElementById(cellId);
+  if (!cell) return;
+
+  // Show progress bar in the cell
+  cell.className = 'evaluating';
+  cell.innerHTML = `<div class="cell-progress-text">0%</div><div class="cell-progress"><div class="cell-progress-bar" style="width:0%"></div></div>`;
   showStatus('<span class="spinner"></span> Evaluating...', 'info');
+
   try {
-    const r = await api(`/api/problems/${currentProblem}/evaluate`, {
+    const resp = await fetch(`${API}/api/problems/${currentProblem}/evaluate_stream`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ strategy_id: sid, instance_id: iid }),
     });
-    if (r.error) throw new Error(r.error);
-    showStatus(`Done: ${r.summary}`, 'info');
-    await refresh();
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();  // keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const msg = JSON.parse(line.slice(6));
+
+        if (msg.type === 'progress') {
+          const pct = Math.round((msg.completed / msg.total) * 100);
+          const bar = cell.querySelector('.cell-progress-bar');
+          const txt = cell.querySelector('.cell-progress-text');
+          if (bar) bar.style.width = pct + '%';
+          if (txt) txt.textContent = `${msg.completed}/${msg.total}`;
+        } else if (msg.type === 'done') {
+          showStatus(`Done: ${msg.summary}`, 'info');
+          await refresh();
+          return;
+        } else if (msg.type === 'error') {
+          throw new Error(msg.error);
+        }
+      }
+    }
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
+    await refresh();
   }
 }
 

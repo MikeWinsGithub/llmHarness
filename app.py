@@ -2,7 +2,10 @@
 
 import os
 import traceback
-from flask import Flask, jsonify, request, send_from_directory
+import json as _json
+import queue
+import threading
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 # Load .env file if present (so colleagues don't need to set env vars)
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -197,6 +200,70 @@ def evaluate(pid):
         "details": result.details,
         "conjecture_holds": result.conjecture_holds,
     })
+
+
+@app.route("/api/problems/<pid>/evaluate_stream", methods=["POST"])
+def evaluate_stream(pid):
+    """Evaluate with Server-Sent Events for progress updates."""
+    problem = PROBLEMS.get(pid)
+    if not problem:
+        return jsonify({"error": f"Unknown problem: {pid}"}), 404
+
+    data = request.json
+    strategy_id = data.get("strategy_id")
+    instance_id = data.get("instance_id")
+    params = data.get("params")
+
+    strategy = storage.get_entry(strategy_id)
+    instance = storage.get_entry(instance_id)
+
+    if not strategy:
+        return jsonify({"error": f"Strategy {strategy_id} not found"}), 404
+    if not instance:
+        return jsonify({"error": f"Instance {instance_id} not found"}), 404
+
+    q = queue.Queue()
+
+    def on_progress(completed, total):
+        q.put({"type": "progress", "completed": completed, "total": total})
+
+    def run_eval():
+        try:
+            result = problem.evaluate(
+                strategy["code"], instance["code"], params,
+                strategy_params=strategy.get("param_values"),
+                instance_params=instance.get("param_values"),
+                progress_callback=on_progress,
+            )
+            storage.save_result(pid, strategy_id, instance_id, result)
+            q.put({
+                "type": "done",
+                "strategy_id": strategy_id,
+                "instance_id": instance_id,
+                "metrics": result.metrics,
+                "summary": result.summary,
+                "details": result.details,
+                "conjecture_holds": result.conjecture_holds,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            q.put({"type": "error", "error": str(e)})
+
+    threading.Thread(target=run_eval, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                msg = q.get(timeout=700)
+            except queue.Empty:
+                yield f"data: {_json.dumps({'type': 'error', 'error': 'Timed out'})}\n\n"
+                return
+            yield f"data: {_json.dumps(msg)}\n\n"
+            if msg["type"] in ("done", "error"):
+                return
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route("/api/problems/<pid>/evaluate_all", methods=["POST"])
