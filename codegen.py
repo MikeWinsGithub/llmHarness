@@ -41,7 +41,7 @@ def extract_tunable_params(code: str) -> dict:
 
 CLAUDE_MODEL = "claude-opus-4-6"
 GPT_MODEL = "gpt-5.4-pro"
-GEMINI_MODEL = "gemini-3.1-pro"
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 
 def _build_context(problem_id: str) -> str:
