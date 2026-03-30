@@ -186,13 +186,14 @@ def _generate_claude(system: str, user_msg: str) -> dict:
     import anthropic, time
     client = anthropic.Anthropic(api_key=get_api_key())
     t0 = time.monotonic()
-    resp = client.messages.create(
+    with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=32000,
         thinking={"type": "enabled", "budget_tokens": 20000},
         system=system,
         messages=[{"role": "user", "content": user_msg}],
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     elapsed = round(time.monotonic() - t0, 1)
     text = next(b.text for b in resp.content if b.type == "text")
     result = _parse_candidate(text)
@@ -293,13 +294,14 @@ def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> di
     parts.append(f"Which candidate is best? Respond with only the letter ({', '.join(labels[i] for i in range(len(candidates)))}).")
 
     client = anthropic.Anthropic(api_key=get_api_key())
-    resp = client.messages.create(
+    with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=1024,
-        thinking={"type": "enabled", "budget_tokens": 100000},
+        thinking={"type": "enabled", "budget_tokens": 10000},
         system=system,
         messages=[{"role": "user", "content": "\n".join(parts)}],
-    )
+    ) as stream:
+        resp = stream.get_final_message()
     choice = next(b.text for b in resp.content if b.type == "text").strip().upper()
 
     # Parse the letter
