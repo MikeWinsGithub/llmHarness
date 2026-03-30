@@ -9,13 +9,8 @@ Instances  = deterministic oracle algorithms f
 """
 
 import hashlib
-import signal
 import numpy as np
 from .base import Problem, EvalResult
-
-
-class _EvalTimeout(Exception):
-    pass
 
 
 # ---------------------------------------------------------------------------
@@ -168,48 +163,43 @@ def run_evaluation(
     except Exception:
         pass  # fall back to caller-supplied k
 
+    import time as _time
+
     rng = np.random.default_rng(seed)
     Ed_accum = np.zeros(max_d)
     trials_completed = 0
+    deadline = _time.monotonic() + timeout
 
-    def _alarm_handler(signum, frame):
-        raise _EvalTimeout()
+    for trial in range(num_oracle_samples):
+        if _time.monotonic() >= deadline:
+            break
 
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(timeout)
+        oracle_seed = rng.integers(0, 2**62)
+        # Use a separate oracle to compute F_true without revealing values
+        truth_oracle = Oracle(rng=np.random.default_rng(oracle_seed))
+        runner = OracleAlgorithmRunner(truth_oracle, instance_fn, N, k)
+        F_true = runner.compute_F_exact()
 
-    try:
-        for trial in range(num_oracle_samples):
-            oracle_seed = rng.integers(0, 2**62)
-            # Use a separate oracle to compute F_true without revealing values
-            truth_oracle = Oracle(rng=np.random.default_rng(oracle_seed))
-            runner = OracleAlgorithmRunner(truth_oracle, instance_fn, N, k)
-            F_true = runner.compute_F_exact()
+        for d_idx in range(max_d):
+            d = d_idx + 1
+            budget = d * k
+            # Fresh oracle with same randomness for each stage
+            stage_oracle = Oracle(rng=np.random.default_rng(oracle_seed))
+            stage_runner = OracleAlgorithmRunner(stage_oracle, instance_fn, N, k)
 
-            for d_idx in range(max_d):
-                d = d_idx + 1
-                budget = d * k
-                # Fresh oracle with same randomness for each stage
-                stage_oracle = Oracle(rng=np.random.default_rng(oracle_seed))
-                stage_runner = OracleAlgorithmRunner(stage_oracle, instance_fn, N, k)
+            try:
+                mu_hat = estimate_fn(stage_runner, N, k, budget)
+            except Exception as e:
+                mu_hat = 0.0  # fallback on error
 
-                try:
-                    mu_hat = estimate_fn(stage_runner, N, k, budget)
-                except _EvalTimeout:
-                    raise
-                except Exception as e:
-                    mu_hat = 0.0  # fallback on error
+            Ed_accum[d_idx] += (mu_hat - F_true) ** 2
 
-                Ed_accum[d_idx] += (mu_hat - F_true) ** 2
+            if _time.monotonic() >= deadline:
+                break
 
-            trials_completed += 1
-            if progress_callback:
-                progress_callback(trials_completed, num_oracle_samples)
-    except _EvalTimeout:
-        pass
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+        trials_completed += 1
+        if progress_callback:
+            progress_callback(trials_completed, num_oracle_samples)
 
     if trials_completed == 0:
         return EvalResult(
