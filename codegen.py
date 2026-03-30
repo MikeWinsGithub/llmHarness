@@ -174,8 +174,8 @@ def _parse_candidate(text: str) -> dict:
     }
 
 
-# Set DEBUG_MODE = True to use fake instant responses for pipeline testing
-DEBUG_MODE = True
+# Set DEBUG_MODE = False to use fake instant responses for pipeline testing
+DEBUG_MODE = False
 
 
 def _generate_claude(system: str, user_msg: str) -> dict:

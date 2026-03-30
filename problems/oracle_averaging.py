@@ -229,8 +229,15 @@ def run_evaluation(
     }
 
     holds = cumulative_risk <= 1.0 + 1e-6  # small tolerance
-    partial = f" (partial: {trials_completed}/{num_oracle_samples} trials)" if trials_completed < num_oracle_samples else ""
-    summary = f"∑E_d = {cumulative_risk:.4f} ({'≤ 1 ✓' if holds else '> 1 ✗'}){partial}"
+    notes = []
+    if trials_completed < num_oracle_samples:
+        notes.append(f"partial: {trials_completed}/{num_oracle_samples} trials")
+    if max_d != 20:
+        notes.append(f"max_d={max_d}")
+    if k > 4:
+        notes.append(f"k={k}")
+    note_str = f" ({', '.join(notes)})" if notes else ""
+    summary = f"∑E_d = {cumulative_risk:.4f} ({'≤ 1 ✓' if holds else '> 1 ✗'}){note_str}"
 
     return EvalResult(
         metrics=metrics,
