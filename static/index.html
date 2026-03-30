@@ -240,7 +240,8 @@ async function init() {
   const sel = document.getElementById('problemSelect');
   sel.innerHTML = problems.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
   sel.onchange = () => loadProblem(sel.value);
-  if (problems.length) loadProblem(problems[0].id);
+  if (problems.length) await loadProblem(problems[0].id);
+  resumeJobs();
 }
 
 async function loadProblem(pid) {
@@ -389,6 +390,33 @@ function cancelClarification() {
   document.getElementById('statusArea').innerHTML = '';
 }
 
+// ---------------------------------------------------------------------------
+// Job-based polling (survives page refresh)
+// ---------------------------------------------------------------------------
+
+let activePolls = {};  // jobId -> intervalId
+
+function pollJob(jobId, eventsSeen, handler, onDone) {
+  const intervalId = setInterval(async () => {
+    try {
+      const r = await api(`/api/jobs/${jobId}?after=${eventsSeen}`);
+      if (r.error) { clearInterval(intervalId); delete activePolls[jobId]; return; }
+      for (const evt of (r.events || [])) {
+        handler(evt);
+        eventsSeen++;
+      }
+      if (r.status === 'done' || r.status === 'error') {
+        clearInterval(intervalId);
+        delete activePolls[jobId];
+        if (r.status === 'done' && r.result) handler(r.result);
+        if (onDone) onDone(r);
+      }
+    } catch (e) { /* retry next poll */ }
+  }, 2000);
+  activePolls[jobId] = intervalId;
+  localStorage.setItem('activeJob_' + jobId, JSON.stringify({jobId, type: handler._jobType || 'unknown', eventsSeen: 0}));
+}
+
 async function suggestEntry(role) {
   const btn = document.getElementById(role === 'strategy' ? 'suggestStratBtn' : 'suggestInstBtn');
   btn.disabled = true;
@@ -397,88 +425,76 @@ async function suggestEntry(role) {
   showStatus(`<span class="spinner"></span> Models are thinking about a new ${role}...`, 'info');
 
   try {
-    const resp = await fetch(`${API}/api/problems/${currentProblem}/suggest_stream`, {
+    const r = await api('/api/jobs', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ role }),
+      body: JSON.stringify({ type: 'suggest', problem_id: currentProblem, role }),
     });
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const msg = JSON.parse(line.slice(6));
-        handleSuggestEvent(msg, role);
-        if (msg.type === 'done' || msg.type === 'error') {
-          btn.disabled = false;
-          return;
-        }
-      }
-    }
+    if (r.error) throw new Error(r.error);
+    localStorage.setItem('activeSuggestJob', r.job_id);
+    const handler = makeSuggestHandler(role, btn);
+    pollJob(r.job_id, 0, handler, () => { btn.disabled = false; });
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
-  } finally {
     btn.disabled = false;
   }
 }
 
-function handleSuggestEvent(msg, role) {
-  const statusEl = document.getElementById('suggestPipelineStatus');
-  const candidatesEl = document.getElementById('suggestCandidates');
-  const judgeEl = document.getElementById('suggestJudge');
-  const errorsEl = document.getElementById('suggestErrors');
+function makeSuggestHandler(role, btn) {
+  function handler(msg) {
+    const statusEl = document.getElementById('suggestPipelineStatus');
+    const candidatesEl = document.getElementById('suggestCandidates');
+    const judgeEl = document.getElementById('suggestJudge');
+    const errorsEl = document.getElementById('suggestErrors');
+    if (!statusEl) return;  // page changed
 
-  if (msg.type === 'started') {
-    statusEl.innerHTML = `<span class="spinner"></span> Waiting for: ${msg.models.join(', ')}`;
+    if (msg.type === 'started') {
+      statusEl.innerHTML = `<span class="spinner"></span> Waiting for: ${msg.models.join(', ')}`;
+    }
+    else if (msg.type === 'candidate') {
+      statusEl.innerHTML = `<span class="spinner"></span> Models still thinking...`;
+      candidatesEl.innerHTML += `
+        <div class="candidate-card">
+          <span class="model-tag">${esc(msg.model)}</span>
+          <h4>${esc(msg.name)}</h4>
+          <div class="desc">${esc(msg.description)}</div>
+          <details><summary>Show code</summary><pre>${esc(msg.code)}</pre></details>
+        </div>`;
+    }
+    else if (msg.type === 'model_error') {
+      errorsEl.innerHTML += `<div class="suggest-errors">${esc(msg.model)} failed: ${esc(msg.error)}</div>`;
+    }
+    else if (msg.type === 'judging') {
+      statusEl.innerHTML = `<span class="spinner"></span> All candidates in. Claude is judging...`;
+    }
+    else if (msg.type === 'winner') {
+      judgeEl.innerHTML = `<div style="margin:12px 0;padding:10px;background:rgba(63,185,80,0.1);border:1px solid var(--green);border-radius:6px">
+        <strong>Winner:</strong> "${esc(msg.name)}" by ${esc(msg.model)} — ${esc(msg.reason)}</div>`;
+      const cards = document.querySelectorAll('#suggestCandidates .candidate-card');
+      cards.forEach(card => {
+        if (card.querySelector('.model-tag')?.textContent === msg.model) {
+          card.classList.add('winner');
+          card.querySelector('.model-tag').insertAdjacentHTML('afterend',
+            ' <span class="model-tag winner-tag">WINNER</span>');
+        }
+      });
+    }
+    else if (msg.type === 'done') {
+      statusEl.innerHTML = `Done! Created ${msg.role || role} "${esc(msg.name)}".`;
+      showStatus(`Created ${msg.role || role} "${esc(msg.name)}".`, 'info');
+      localStorage.removeItem('activeSuggestJob');
+      if (btn) btn.disabled = false;
+      refresh();
+    }
+    else if (msg.type === 'error') {
+      statusEl.innerHTML = `Failed.`;
+      showStatus(`Error: ${msg.error}`, 'error');
+      localStorage.removeItem('activeSuggestJob');
+      if (btn) btn.disabled = false;
+    }
   }
-  else if (msg.type === 'candidate') {
-    statusEl.innerHTML = `<span class="spinner"></span> Models still thinking...`;
-    candidatesEl.innerHTML += `
-      <div class="candidate-card">
-        <span class="model-tag">${esc(msg.model)}</span>
-        <h4>${esc(msg.name)}</h4>
-        <div class="desc">${esc(msg.description)}</div>
-        <details><summary>Show code</summary><pre>${esc(msg.code)}</pre></details>
-      </div>`;
-  }
-  else if (msg.type === 'model_error') {
-    errorsEl.innerHTML += `<div class="suggest-errors">${esc(msg.model)} failed: ${esc(msg.error)}</div>`;
-  }
-  else if (msg.type === 'judging') {
-    statusEl.innerHTML = `<span class="spinner"></span> All candidates in. Claude is judging...`;
-  }
-  else if (msg.type === 'winner') {
-    judgeEl.innerHTML = `<div style="margin:12px 0;padding:10px;background:rgba(63,185,80,0.1);border:1px solid var(--green);border-radius:6px">
-      <strong>Winner:</strong> "${esc(msg.name)}" by ${esc(msg.model)} — ${esc(msg.reason)}</div>`;
-    // Highlight the winning card
-    const cards = document.querySelectorAll('#suggestCandidates .candidate-card');
-    cards.forEach(card => {
-      if (card.querySelector('.model-tag')?.textContent === msg.model) {
-        card.classList.add('winner');
-        card.querySelector('.model-tag').insertAdjacentHTML('afterend',
-          ' <span class="model-tag winner-tag">WINNER</span>');
-      }
-    });
-  }
-  else if (msg.type === 'done') {
-    statusEl.innerHTML = `Done! Created ${msg.role} "${esc(msg.name)}".`;
-    showStatus(`Created ${msg.role} "${esc(msg.name)}". Click it to see the description.`, 'info');
-    refresh();
-  }
-  else if (msg.type === 'error') {
-    statusEl.innerHTML = `Failed.`;
-    showStatus(`Error: ${msg.error}`, 'error');
-  }
+  handler._jobType = 'suggest';
+  return handler;
 }
 
 async function evalOneStream(sid, iid) {
@@ -486,53 +502,93 @@ async function evalOneStream(sid, iid) {
   const cell = document.getElementById(cellId);
   if (!cell) return;
 
-  // Show progress bar in the cell
   cell.className = 'evaluating';
-  cell.innerHTML = `<div class="cell-progress-text">0%</div><div class="cell-progress"><div class="cell-progress-bar" style="width:0%"></div></div>`;
+  cell.innerHTML = `<div class="cell-progress-text">starting...</div><div class="cell-progress"><div class="cell-progress-bar" style="width:0%"></div></div>`;
   showStatus('<span class="spinner"></span> Evaluating...', 'info');
 
   try {
-    const resp = await fetch(`${API}/api/problems/${currentProblem}/evaluate_stream`, {
+    const r = await api('/api/jobs', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ strategy_id: sid, instance_id: iid }),
+      body: JSON.stringify({ type: 'evaluate', problem_id: currentProblem, strategy_id: sid, instance_id: iid }),
     });
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop();  // keep incomplete line in buffer
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const msg = JSON.parse(line.slice(6));
-
-        if (msg.type === 'progress') {
-          const pct = Math.round((msg.completed / msg.total) * 100);
-          const bar = cell.querySelector('.cell-progress-bar');
-          const txt = cell.querySelector('.cell-progress-text');
-          if (bar) bar.style.width = pct + '%';
-          if (txt) txt.textContent = `${msg.completed}/${msg.total}`;
-        } else if (msg.type === 'done') {
-          showStatus(`Done: ${msg.summary}`, 'info');
-          await refresh();
-          return;
-        } else if (msg.type === 'error') {
-          throw new Error(msg.error);
-        }
-      }
-    }
+    if (r.error) throw new Error(r.error);
+    localStorage.setItem(`activeEvalJob_${sid}_${iid}`, r.job_id);
+    pollJob(r.job_id, 0, makeEvalHandler(sid, iid), () => {
+      localStorage.removeItem(`activeEvalJob_${sid}_${iid}`);
+    });
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
     await refresh();
   }
+}
+
+function makeEvalHandler(sid, iid) {
+  function handler(msg) {
+    const cellId = `cell-${sid}-${iid}`;
+    const cell = document.getElementById(cellId);
+
+    if (msg.type === 'progress' && cell) {
+      const pct = Math.round((msg.completed / msg.total) * 100);
+      const bar = cell.querySelector('.cell-progress-bar');
+      const txt = cell.querySelector('.cell-progress-text');
+      if (bar) bar.style.width = pct + '%';
+      if (txt) txt.textContent = `${msg.completed}/${msg.total}`;
+    }
+    else if (msg.type === 'done') {
+      showStatus(`Done: ${msg.summary}`, 'info');
+      refresh();
+    }
+    else if (msg.type === 'error') {
+      showStatus(`Error: ${msg.error}`, 'error');
+      refresh();
+    }
+  }
+  handler._jobType = 'evaluate';
+  return handler;
+}
+
+// Resume any active jobs on page load
+async function resumeJobs() {
+  try {
+    const running = await api('/api/jobs');
+    if (!Array.isArray(running)) return;
+    for (const job of running) {
+      if (job.type === 'suggest') {
+        const role = job.params?.role || 'instance';
+        const debugEl = document.getElementById('suggestDebug');
+        if (debugEl) {
+          debugEl.innerHTML = '<div class="suggest-debug"><h3>Suggestion Pipeline</h3><div id="suggestPipelineStatus"><span class="spinner"></span> Resuming...</div><div id="suggestCandidates"></div><div id="suggestJudge"></div><div id="suggestErrors"></div></div>';
+        }
+        const handler = makeSuggestHandler(role, null);
+        // Replay all existing events then continue polling
+        const full = await api(`/api/jobs/${job.id}`);
+        let seen = 0;
+        for (const evt of (full.events || [])) { handler(evt); seen++; }
+        if (full.status === 'running') {
+          pollJob(job.id, seen, handler);
+        }
+      }
+      else if (job.type === 'evaluate') {
+        const sid = job.params?.strategy_id;
+        const iid = job.params?.instance_id;
+        if (!sid || !iid) continue;
+        const cellId = `cell-${sid}-${iid}`;
+        const cell = document.getElementById(cellId);
+        if (cell) {
+          cell.className = 'evaluating';
+          cell.innerHTML = `<div class="cell-progress-text">resuming...</div><div class="cell-progress"><div class="cell-progress-bar" style="width:0%"></div></div>`;
+        }
+        const handler = makeEvalHandler(sid, iid);
+        const full = await api(`/api/jobs/${job.id}`);
+        let seen = 0;
+        for (const evt of (full.events || [])) { handler(evt); seen++; }
+        if (full.status === 'running') {
+          pollJob(job.id, seen, handler);
+        }
+      }
+    }
+  } catch (e) { console.error('resumeJobs:', e); }
 }
 
 async function evaluateAll() {

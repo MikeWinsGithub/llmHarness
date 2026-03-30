@@ -174,8 +174,15 @@ def _parse_candidate(text: str) -> dict:
     }
 
 
+# Set DEBUG_MODE = True to use fake instant responses for pipeline testing
+DEBUG_MODE = True
+
+
 def _generate_claude(system: str, user_msg: str) -> dict:
     """Generate a candidate using Claude Opus 4.6 with extended thinking."""
+    if DEBUG_MODE:
+        import time; time.sleep(2)
+        return {"name": "Claude Test Instance", "description": "A test instance from Claude.", "code": 'def oracle_algorithm(x, query):\n    return float(query(0))\n', "model": "Claude Opus 4.6"}
     import anthropic
     client = anthropic.Anthropic(api_key=get_api_key())
     resp = client.messages.create(
@@ -193,6 +200,9 @@ def _generate_claude(system: str, user_msg: str) -> dict:
 
 def _generate_gpt(system: str, user_msg: str) -> dict:
     """Generate a candidate using GPT 5.4 Pro with reasoning."""
+    if DEBUG_MODE:
+        import time; time.sleep(4)
+        return {"name": "GPT Test Instance", "description": "A test instance from GPT.", "code": 'def oracle_algorithm(x, query):\n    return float(query(1))\n', "model": "GPT 5.4 Pro"}
     from openai import OpenAI
     client = OpenAI(api_key=get_openai_api_key())
     resp = client.responses.create(
@@ -210,6 +220,9 @@ def _generate_gpt(system: str, user_msg: str) -> dict:
 
 def _generate_gemini(system: str, user_msg: str) -> dict:
     """Generate a candidate using Gemini 3.1 with thinking enabled."""
+    if DEBUG_MODE:
+        import time; time.sleep(3)
+        return {"name": "Gemini Test Instance", "description": "A test instance from Gemini.", "code": 'def oracle_algorithm(x, query):\n    return float(query(2))\n', "model": "Gemini 3.1"}
     from google import genai
     client = genai.Client(api_key=get_gemini_api_key())
     resp = client.models.generate_content(
@@ -229,6 +242,9 @@ def _generate_gemini(system: str, user_msg: str) -> dict:
 
 def _judge_candidates(candidates: list[dict], problem: Problem, role: str) -> dict:
     """Use Claude Opus 4.6 to judge which candidate is best."""
+    if DEBUG_MODE:
+        import time; time.sleep(1)
+        return candidates[0]  # Just pick the first one
     import anthropic
 
     labels = "ABCDEFGHIJ"

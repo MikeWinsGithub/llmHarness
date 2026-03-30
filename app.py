@@ -19,6 +19,7 @@ if os.path.exists(_env_path):
 from problems.oracle_averaging import OracleAveragingProblem
 import storage
 import codegen
+import jobs
 
 app = Flask(__name__, static_folder="static")
 
@@ -428,6 +429,128 @@ def get_entry(eid):
     if not entry:
         return jsonify({"error": "Not found"}), 404
     return jsonify(entry)
+
+
+# ---------------------------------------------------------------------------
+# Job system — fire-and-forget background jobs
+# ---------------------------------------------------------------------------
+
+def _run_suggest_job(job_id, problem, role):
+    """Background thread for suggestion jobs."""
+    try:
+        sink = jobs.EventSink(job_id)
+        result = codegen.suggest_entry_streaming(problem, role, sink)
+        code = result["code"]
+        tunable_params = codegen.extract_tunable_params(code)
+        entry = storage.make_entry(problem.id, role, result["name"], result["description"], code, tunable_params)
+        storage.save_entry(entry)
+        jobs.finish_job(job_id, {
+            "type": "done",
+            "id": entry.id,
+            "name": entry.name,
+            "description": entry.description,
+            "code": entry.code,
+            "role": entry.role,
+            "tunable_params": entry.tunable_params,
+            "param_values": entry.param_values,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        jobs.append_event(job_id, {"type": "error", "error": str(e)})
+        jobs.finish_job(job_id, {"error": str(e)}, status="error")
+
+
+def _run_evaluate_job(job_id, problem, strategy, instance, params):
+    """Background thread for evaluation jobs."""
+    try:
+        def on_progress(completed, total):
+            jobs.append_event(job_id, {"type": "progress", "completed": completed, "total": total})
+
+        result = problem.evaluate(
+            strategy["code"], instance["code"], params,
+            strategy_params=strategy.get("param_values"),
+            instance_params=instance.get("param_values"),
+            progress_callback=on_progress,
+        )
+        storage.save_result(problem.id, strategy["id"], instance["id"], result)
+        jobs.finish_job(job_id, {
+            "type": "done",
+            "strategy_id": strategy["id"],
+            "instance_id": instance["id"],
+            "metrics": result.metrics,
+            "summary": result.summary,
+            "details": result.details,
+            "conjecture_holds": result.conjecture_holds,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        jobs.append_event(job_id, {"type": "error", "error": str(e)})
+        jobs.finish_job(job_id, {"error": str(e)}, status="error")
+
+
+@app.route("/api/jobs", methods=["POST"])
+def create_job():
+    """Start a background job."""
+    data = request.json or {}
+    job_type = data.get("type")
+
+    if job_type == "suggest":
+        pid = data.get("problem_id")
+        role = data.get("role")
+        problem = PROBLEMS.get(pid)
+        if not problem:
+            return jsonify({"error": f"Unknown problem: {pid}"}), 404
+        if role not in ("strategy", "instance"):
+            return jsonify({"error": "role must be 'strategy' or 'instance'"}), 400
+        job_id = jobs.create_job("suggest", {"problem_id": pid, "role": role})
+        threading.Thread(target=_run_suggest_job, args=(job_id, problem, role), daemon=True).start()
+        return jsonify({"job_id": job_id})
+
+    elif job_type == "evaluate":
+        pid = data.get("problem_id")
+        problem = PROBLEMS.get(pid)
+        if not problem:
+            return jsonify({"error": f"Unknown problem: {pid}"}), 404
+        strategy = storage.get_entry(data.get("strategy_id"))
+        instance = storage.get_entry(data.get("instance_id"))
+        if not strategy:
+            return jsonify({"error": "Strategy not found"}), 404
+        if not instance:
+            return jsonify({"error": "Instance not found"}), 404
+        job_id = jobs.create_job("evaluate", {
+            "problem_id": pid,
+            "strategy_id": strategy["id"],
+            "instance_id": instance["id"],
+        })
+        threading.Thread(target=_run_evaluate_job,
+                         args=(job_id, problem, strategy, instance, data.get("params")),
+                         daemon=True).start()
+        return jsonify({"job_id": job_id})
+
+    return jsonify({"error": "Unknown job type"}), 400
+
+
+@app.route("/api/jobs/<job_id>")
+def get_job(job_id):
+    """Poll a job's status and events."""
+    job = jobs.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Not found"}), 404
+    after = request.args.get("after", 0, type=int)
+    return jsonify({
+        "id": job["id"],
+        "type": job["type"],
+        "status": job["status"],
+        "events": job["events"][after:],
+        "events_total": len(job["events"]),
+        "result": job["result"],
+    })
+
+
+@app.route("/api/jobs")
+def list_jobs():
+    """List running jobs."""
+    return jsonify(jobs.list_running())
 
 
 if __name__ == "__main__":
