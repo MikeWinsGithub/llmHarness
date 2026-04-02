@@ -8,13 +8,13 @@ The first (and currently only) problem is the **Oracle-Averaging Conjecture** fr
 
 ## Current status
 
-**The app is fully working.** Flask runs on `http://localhost:5111`, the dashboard loads, and the evaluation engine produces correct results.
+**The app is fully working and deployed on Render** (paid tier, persistent filesystem). The dashboard loads, the evaluation engine produces correct results, and the multi-model suggestion pipeline is operational.
 
 ### Bug fixes applied earlier (still in effect)
 1. `compute_F_exact` uses a separate truth oracle (same seed) to avoid leaking values.
 2. Oracle values are derived deterministically from `(seed, query_id)` — order-independent.
 
-### Features added in previous sessions
+### Features from older sessions
 
 1. **Tunable parameters on entries.** Each strategy/instance can define a `TUNABLE_PARAMS` dict in its code with metadata (default, min, max, type, description). The harness extracts these at submission time and stores them on the entry. A `params` dict in the exec namespace provides runtime values. Users hover over entries with a ⚙ gear icon to see a popover with editable number inputs; changes save via `PATCH /api/entries/<eid>/params` and invalidate stale results.
 
@@ -24,53 +24,69 @@ The first (and currently only) problem is the **Oracle-Averaging Conjecture** fr
    - Both steps use extended thinking (8K budget for elaboration, 10K for code gen).
    - Both steps receive **full context**: every existing entry's name, description, code, and params.
 
-3. **AI suggestion buttons.** An "AI Suggestions" section at the bottom of the dashboard has "Suggest New Strategy" and "Suggest New Instance" buttons. These call Opus with a 20K thinking budget and all existing entries as context. Opus returns a `---NAME---`, `---DESCRIPTION---`, `---CODE---` structured response that gets parsed and saved automatically.
+3. **Automatic backups.** Every write to `entries.json` or `results.json` saves a timestamped copy in `data/backups/` (keeps last 20 per file).
 
-4. **Automatic backups.** Every write to `entries.json` or `results.json` saves a timestamped copy in `data/backups/` (keeps last 20 per file).
+4. **Idempotent seeding.** `seed.py` checks for existing entries by name+role before creating; safe to re-run.
 
-5. **Idempotent seeding.** `seed.py` checks for existing entries by name+role before creating; safe to re-run.
+5. **Paragraph-length descriptions.** Clicking an entry in the dashboard shows a detailed description plus a Tunable Parameters section with current values, types, ranges, and descriptions.
 
-6. **`.env` file for API key.** The app loads `ANTHROPIC_API_KEY` from `.env` at startup. Colleagues on the shared Dropbox just run `python app.py` — no manual key setup.
+6. **Fast oracle hashing.** `Oracle.query` uses `hashlib.md5` instead of constructing a full `np.random.default_rng` per unique query.
 
-7. **Paragraph-length descriptions.** Clicking an entry in the dashboard shows a detailed description plus a Tunable Parameters section with current values, types, ranges, and descriptions.
+7. **Auto-detect k from instance.** `run_evaluation` probes the instance on a test input before running, counts how many oracle queries it makes, and bumps k to match if the instance needs more than the default.
 
-### Changes in this session (2026-03-29)
+8. **Hybrid exact/MC posterior in strategies.** Sample-Update and Merge-aware use exact branching when unknowns per input ≤ `max_exact_unknowns` (default 10, tunable), falling back to Monte Carlo sampling otherwise.
 
-8. **Fast oracle hashing.** `Oracle.query` now uses `hashlib.md5` instead of constructing a full `np.random.default_rng` per unique query. 4000 unique queries complete in ~2ms (was much slower). This matters for high-k instances like Deep Layered Graph with ~3800 unique oracle locations.
+### Changes in this session (2026-04-02)
 
-9. **Auto-detect k from instance.** `run_evaluation` probes the instance on a test input before running, counts how many oracle queries it makes, and bumps k to match if the instance needs more than the default. Deep Layered Graph (k=481) now works without manually overriding eval params.
+9. **Multi-model suggestion pipeline.** The "Suggest" buttons now query three models in parallel:
+   - **Claude Opus 4.6** (20K thinking budget, streaming)
+   - **GPT 5.4 Pro** (high reasoning effort)
+   - **Gemini 3.1 Pro Preview** (10K thinking budget)
+   Each generates a candidate (name, description, code). Then **Claude Opus 4.6** judges which is best. The thinking budgets are currently at "medium" — they can be cranked up in `codegen.py` (the generator functions at the top).
 
-10. **Evaluation timeout.** `run_evaluation` accepts a `timeout` parameter (default 120s). Uses `SIGALRM` to cap wall-clock time, completing as many trials as possible and returning partial results. The summary notes `(partial: N/M trials)` when truncated.
+10. **Server-side job system.** Both suggestions and evaluations run as background jobs (`jobs.py`). Jobs persist to `data/jobs/*.json` and run to completion regardless of whether the browser is open. The frontend polls every 2 seconds for updates. On page load, running jobs resume and the most recent completed suggestion job is replayed.
 
-11. **Hybrid exact/MC posterior in strategies.** Sample-Update and Merge-aware now use a two-tier posterior computation:
-    - **Exact branching** when unknowns per input ≤ `max_exact_unknowns` (default 10, tunable). This preserves exact results for all k≤10 instances.
-    - **Monte Carlo sampling** when unknowns exceed the threshold — samples `num_mc_samples` (default 64, tunable) random oracle assignments and averages. Falls back via a `_TooDeep` exception that abandons partial branching and does pure MC.
-    - Both strategies now have `TUNABLE_PARAMS`: `num_mc_samples` and `max_exact_unknowns`.
+11. **Live progress in the dashboard.**
+    - Clicking any cell in the results matrix triggers a re-evaluation with a progress bar showing `N/M` trials completed.
+    - The suggestion pipeline shows each model's candidate card as it arrives, with timing stats (elapsed seconds, input/output token counts), then the judge's decision.
+
+12. **Timing stats on API calls.** Each model call records elapsed time and token usage (input/output). Displayed next to the model tag on candidate cards and saved in job JSON files.
+
+13. **Evaluation improvements.**
+    - Default timeout increased from 120s to 600s.
+    - Timeout uses `time.monotonic()` deadline (thread-safe) instead of `SIGALRM`.
+    - Auto-scales `num_oracle_samples` and `max_d` for high-k instances (k>20) to avoid timeouts. Summary notes the actual k and max_d used.
+
+14. **Render deployment.** `render.yaml` configures the web service. `app.py` reads `PORT` from env, binds `0.0.0.0`, disables debug mode in production. API keys are set as environment variables in Render's dashboard.
+
+15. **API key bar removed from dashboard.** Keys come from `.env` / environment variables only. No more in-browser key entry.
 
 ## File structure
 
 ```
 llmHarness/
-├── app.py                    # Flask backend (routes, .env loader)
-├── codegen.py                # Opus-powered elaboration, code gen, suggestions
+├── app.py                    # Flask backend (routes, .env loader, job endpoints)
+├── codegen.py                # Multi-model suggestion pipeline, elaboration, code gen
+├── jobs.py                   # Background job tracking with JSON persistence
 ├── storage.py                # JSON-file persistence with auto-backups
 ├── seed.py                   # Idempotent seeding of baseline entries
-├── run.sh                    # Launch script
-├── requirements.txt          # flask, anthropic, numpy
-├── .env                      # ANTHROPIC_API_KEY (not in git)
+├── render.yaml               # Render deployment config
+├── requirements.txt          # flask, anthropic, numpy, openai, google-genai
+├── .env                      # API keys (not in git): ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY
 ├── .gitignore                # .env, backups, __pycache__
 ├── oracle_averaging_notes.pdf  # The math paper
 ├── problems/
 │   ├── __init__.py
 │   ├── base.py               # Entry (with tunable_params, param_values), Problem ABC
-│   └── oracle_averaging.py   # Oracle, Runner, run_evaluation (with param injection)
+│   └── oracle_averaging.py   # Oracle, Runner, run_evaluation (with param injection, auto-scaling)
 ├── static/
-│   └── index.html            # Dashboard (params popover, clarification UI, suggest buttons)
+│   └── index.html            # Dashboard (progress bars, suggestion debug panel, polling)
 ├── data/
 │   ├── entries.json           # All strategies and instances
 │   ├── results.json           # Evaluation results
+│   ├── jobs/                  # Background job state (one JSON per job)
 │   └── backups/               # Auto-timestamped backups
-└── handoff.md                 # This file
+└── HANDOFF.md                 # This file
 ```
 
 ## Key abstractions
@@ -91,7 +107,7 @@ class Entry:
 ```
 
 ### Problem (problems/base.py)
-- `evaluate(strategy_code, instance_code, params, strategy_params, instance_params)` — eval params + per-entry tunable params
+- `evaluate(strategy_code, instance_code, params, strategy_params, instance_params, progress_callback)` — eval params + per-entry tunable params + optional progress callback
 
 ### Oracle-Averaging specifics (problems/oracle_averaging.py)
 
@@ -110,43 +126,54 @@ def estimate(runner, N, k, budget):
     # return float estimate of F(O)
 ```
 
-**Tunable params convention:** Code defines `TUNABLE_PARAMS` dict and `params` dict at module level. The evaluation engine injects user overrides into `params` via the exec namespace before calling the functions.
-
-**Evaluation** (`run_evaluation`): For each oracle sample, computes F(O) exactly via a truth oracle, then for each stage d=1..max_d creates a fresh stage oracle, calls estimate() with budget=dk, records (μ̂ − F)². Default params: N=8, k=4, max_d=20, num_oracle_samples=50, timeout=120. The k is auto-detected from the instance (bumped if the instance needs more than the default).
+**Evaluation** (`run_evaluation`): For each oracle sample, computes F(O) exactly via a truth oracle, then for each stage d=1..max_d creates a fresh stage oracle, calls estimate() with budget=dk, records (μ̂ − F)². Default params: N=8, k=4, max_d=20, num_oracle_samples=50, timeout=600. The k is auto-detected from the instance. For high-k instances (k>20), trials and stages are auto-scaled down.
 
 ### Codegen pipeline (codegen.py)
 
-**Model:** `claude-opus-4-6` with extended thinking for all calls.
+**Models:** Claude Opus 4.6 (`claude-opus-4-6`), GPT 5.4 Pro (`gpt-5.4-pro`), Gemini 3.1 Pro Preview (`gemini-3.1-pro-preview`).
 
-**`elaborate_description(problem, role, description, clarification)`** → `{status: "elaborated", description}` or `{status: "unsure", question}`. Thinking budget: 8K tokens.
+**`elaborate_description(problem, role, description, clarification)`** → `{status: "elaborated", description}` or `{status: "unsure", question}`. Claude only, 8K thinking.
 
-**`generate_code(problem, role, description)`** → Python code string. Thinking budget: 10K tokens.
+**`generate_code(problem, role, description)`** → Python code string. Claude only, 10K thinking.
 
-**`suggest_entry(problem, role)`** → `{name, description, code}`. Thinking budget: 20K tokens.
+**`suggest_entry(problem, role)`** → `{name, description, code, debug}`. Three models in parallel + Claude judge. Returns debug info with all candidates.
+
+**`suggest_entry_streaming(problem, role, event_queue)`** → same, but pushes events to a queue as each model finishes. Used by the job system.
 
 **`extract_tunable_params(code)`** → dict. Execs code in sandbox, extracts `TUNABLE_PARAMS`.
 
-**`_build_context(problem_id)`** → string with all existing entries (names, descriptions, code, params). Included in all LLM prompts.
+**`_build_context(problem_id)`** → string with all existing entries. Included in all LLM prompts.
 
-### Storage (storage.py)
-JSON files in `data/`. Auto-backups on every write (timestamped copies in `data/backups/`, keeps 20). Key functions:
-- `save_entry`, `list_entries`, `get_entry`, `delete_entry`
-- `update_param_values(entry_id, values)` — saves overrides, invalidates associated results
-- `make_entry(problem_id, role, name, desc, code, tunable_params)` — creates Entry with defaults derived from tunable_params
+**`DEBUG_MODE`** — set to `True` in codegen.py for instant fake responses (pipeline testing).
+
+### Job system (jobs.py)
+
+Background jobs run in threads, saving state to `data/jobs/<id>.json`. Each job has: id, type, status (running/done/error), events list, result.
+
+Key functions: `create_job`, `append_event`, `finish_job`, `get_job`, `list_running`, `list_recent`.
+
+`EventSink` class adapts the job system for `suggest_entry_streaming`'s queue interface.
+
+On startup, `load_all()` marks any stale "running" jobs as errors.
 
 ### Flask API endpoints (app.py)
 
 - `GET /` — serves dashboard
-- `GET/POST /api/config` — API key management
+- `GET/POST /api/config` — API key management (legacy, keys now come from env)
 - `GET /api/problems` — list problems
 - `GET /api/problems/<pid>/entries` — `{strategies, instances}` with tunable_params/param_values
 - `GET /api/problems/<pid>/results` — all results
-- `POST /api/problems/<pid>/submit` — elaborate + generate code pipeline, handles `clarification` field for UNSURE responses
-- `POST /api/problems/<pid>/submit_code` — save hand-written code (extracts TUNABLE_PARAMS)
-- `POST /api/problems/<pid>/suggest` — AI suggestion via heavy reasoning
-- `POST /api/problems/<pid>/evaluate` — evaluate one pair (passes entry param_values)
+- `POST /api/problems/<pid>/submit` — elaborate + generate code pipeline
+- `POST /api/problems/<pid>/submit_code` — save hand-written code
+- `POST /api/problems/<pid>/suggest` — AI suggestion (synchronous, returns debug)
+- `POST /api/problems/<pid>/suggest_stream` — AI suggestion via SSE (legacy)
+- `POST /api/problems/<pid>/evaluate` — evaluate one pair (synchronous)
+- `POST /api/problems/<pid>/evaluate_stream` — evaluate via SSE (legacy)
 - `POST /api/problems/<pid>/evaluate_all` — batch evaluate
-- `PATCH /api/entries/<eid>/params` — update tunable param values (type-coerces, invalidates results)
+- **`POST /api/jobs`** — start a background job (`type`: "suggest" or "evaluate")
+- **`GET /api/jobs/<id>`** — poll job status and events (`?after=N` for incremental)
+- **`GET /api/jobs`** — list recent jobs (or `?status=running` for running only)
+- `PATCH /api/entries/<eid>/params` — update tunable param values
 - `GET /api/entries/<eid>` — get single entry
 - `DELETE /api/entries/<eid>` — delete entry + results
 
@@ -159,39 +186,54 @@ JSON files in `data/`. Auto-backups on every write (timestamped copies in `data/
 | 08083c3c | Sample-Update | Samples d inputs, then computes exact conditional E[F\|observed] by branching on unknowns. General-purpose Bayesian estimator. |
 | 07d3977a | Merge-aware | Like Sample-Update but runs instance_fn with a smart query wrapper that returns cached oracle values for free. Budget only pays for genuinely new queries. Strictly better than Sample-Update on any instance with query overlap. |
 
-### Instances (5+)
+### Instances (6)
 | ID | Name | Params | Description |
 |----|------|--------|-------------|
-| 1c65e325 | Single query | num_values | Encodes full x as integer, queries oracle at x % num_values. Depth 1. |
-| fdd50cdf | Parity of k queries | num_queries, M | k queries at hashed locations, returns product. High-degree Fourier structure. |
-| 4355a17e | Adaptive chain | chain_length, modulus, step_multiplier | Sequential queries where each location depends on previous oracle answer. |
-| 9ea2790c | Layered graph | width, depth | Random-map layers via log2(W) oracle bits per transition. True [W]→[W] maps. Merging paths. |
-| eebbbedf | Deep Layered Graph | width, depth_multiplier | (AI-suggested variant) |
-| 5dd882a1 | Cone | fanin, num_layers | (AI-suggested variant) |
+| 1c65e325 | Single query | num_values | Depth 1. |
+| fdd50cdf | Parity of k queries | num_queries, M | Product of k queries at hashed locations. |
+| 4355a17e | Adaptive chain | chain_length, modulus, step_multiplier | Sequential adaptive queries. |
+| 9ea2790c | Layered graph | width, depth | Random-map layers. |
+| eebbbedf | Deep Layered Graph | width, depth_multiplier | 160 layers, W=8, k=481. Extreme merging. |
+| 5dd882a1 | Cone | fanin, num_layers | Narrowing funnel graph. Currently fanin=2, num_layers=6 (k=16). |
 
-### Key results
-- Simple averaging fails on all instances (cumulative risk > 1).
-- Sample-Update passes all standard instances but **fails on Layered graph** (1.06 > 1) — it wastes budget on redundant oracle queries.
-- Merge-aware passes everything, including Layered graph (0.55). Strictly dominates Sample-Update.
-- Deep Layered Graph (k=481) now evaluable. Merge-aware gets cumulative risk ≈ 0 — the extreme merging (160 layers, W=8) means nearly all paths coalesce, so F(O) depends on very few effective oracle bits. Sample-Update is slower (budget wasted on random inputs) but also passes.
+### Key results (fresh, 2026-04-02)
+| | Adaptive chain | Single query | Parity k | Layered graph | Deep Layered | Cone |
+|---|---|---|---|---|---|---|
+| **Simple avg** | 3.58 ✗ | 3.81 ✗ | 3.35 ✗ | 2.68 ✗ | 0.00 ✓ | 0.95 ✓ |
+| **Sample-Update** | 0.13 ✓ | 0.07 ✓ | 0.07 ✓ | **1.04 ✗** | 0.00 ✓ | 0.69 ✓ |
+| **Merge-aware** | 0.13 ✓ | 0.06 ✓ | 0.07 ✓ | 0.62 ✓ | 0.00 ✓ | 0.49 ✓ |
 
-## How to run
+Notes:
+- Deep Layered Graph results are auto-scaled (max_d=5, k=481) — the 0.00 is genuine due to extreme path merging.
+- Sample-Update fails on Layered graph (1.04 > 1) — it wastes budget on redundant queries.
+- Merge-aware passes everything currently. The Cone instance is too easy because its output is degree 1 (single terminal oracle query). Modifying it to output a product of all oracle values along the path would make it degree-k and much harder.
 
+## Deployment
+
+**Render** (paid tier, persistent filesystem):
+- Auto-deploys from branch `claude/read-handoff-doc-27yPw` on push
+- API keys set as environment variables in Render dashboard: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`
+- `render.yaml` configures the service
+- `seed.py` runs at build time
+
+**Local:**
 ```bash
 cd llmHarness
 pip install -r requirements.txt
-python seed.py          # first time only (idempotent)
+python seed.py          # first time only
 python app.py           # starts on http://localhost:5111
 ```
 
-The `.env` file has the API key — no manual setup needed.
+The `.env` file needs `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
+
+**Note on network restrictions:** Claude Code on the web (Anthropic's cloud environment) blocks outbound connections to OpenAI. The GPT and Gemini APIs only work from Render or a local machine.
 
 ## What to work on next
 
-- The suggest feature can propose novel strategies/instances — try it and evaluate results
-- Increase N/k for harder evaluations (may need eval param UI)
-- The dashboard doesn't yet let you adjust eval params (N, k, max_d, num_oracle_samples, timeout) from the UI — this was listed as a future direction. k is now auto-detected from instances, but other params still use defaults.
-- Consider adding the full multi-bit layered model from the PDF (with configurable k)
-- The PDF also discusses the oblivious case proof and the general bound of k — could add instances that specifically probe these boundaries
-- The MC posterior introduces noise — strategies with `max_exact_unknowns=0` (pure MC) could be compared against exact to measure approximation quality on standard instances
-- Sample-Update is much slower than Merge-aware on high-k instances; could explore strategies that are smarter about which inputs to sample (e.g., targeting inputs that share queries with already-explored paths)
+- **Fix the Cone instance** — output should be product of all oracle values along the path (degree-k), not just the terminal sign query (degree 1). This would make it genuinely hard for Merge-aware at large depth/fanin.
+- **Crank up thinking budgets** once the pipeline is verified working. The generator functions in `codegen.py` control this. Claude can go up to 100K (requires streaming), GPT supports `"xhigh"` effort, Gemini up to 24K thinking budget.
+- **Add eval param UI** — the dashboard doesn't let you adjust N, k, max_d, num_oracle_samples, timeout from the UI.
+- **Explore novel instances** that could push cumulative risk above 1 — the suggest pipeline can help.
+- **Add strategies** that are smarter about which inputs to sample (e.g., targeting inputs that share queries with already-explored paths).
+- **Database for persistence** — currently JSON files on disk. If the app grows, consider SQLite or Postgres.
+- **Merge to main** — all work is on `claude/read-handoff-doc-27yPw`. Consider merging to main and updating Render to deploy from main.
