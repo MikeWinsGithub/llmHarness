@@ -379,9 +379,33 @@ STRATEGIES = {
 # Evaluation
 # ---------------------------------------------------------------------------
 
+def probe_then_fwd_queries(widths, offsets, D, N, seed, oracle_seed, probe_spec):
+    """General probe strategy: probe_spec is list of (layer_index, n_probes).
+    Do probes first, then fwd-merge."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    for layer_idx, n in probe_spec:
+        layer = max(0, min(D - 1, layer_idx))
+        for _ in range(n):
+            v = int(rng.integers(0, widths[layer]))
+            for l in range(layer, D - 1):
+                qid = offsets[l] + v
+                nv = widths[l + 1]
+                if qid not in known:
+                    order.append((qid, l, nv))
+                v = _oq_helper(known, oracle_seed, qid, nv)
+            qid = offsets[D - 1] + v
+            if qid not in known:
+                order.append((qid, D - 1, 2))
+                _oq_helper(known, oracle_seed, qid, 2)
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
+    return order
+
+
 def evaluate_single_trial(args):
     """Run a single trial. Designed for multiprocessing."""
-    widths_list, offsets_list, D, N, oracle_seed, strategy_seed, strategy_name = args
+    widths_list, offsets_list, D, N, oracle_seed, strategy_seed, strategy_spec = args
     widths = np.array(widths_list, dtype=np.int32)
     offsets = np.array(offsets_list, dtype=np.int32)
     total_q = sum(widths_list)
@@ -389,9 +413,13 @@ def evaluate_single_trial(args):
 
     F_true = compute_F_true(widths, offsets, D, N, oracle_seed)
 
-    # Get query order based on strategy
-    strat_fn = STRATEGIES[strategy_name]
-    query_order = strat_fn(widths_list, offsets_list, D, N, strategy_seed, oracle_seed)
+    # Get query order: strategy_spec is either a string (named strategy) or a list (probe spec)
+    if isinstance(strategy_spec, str):
+        strat_fn = STRATEGIES[strategy_spec]
+        query_order = strat_fn(widths_list, offsets_list, D, N, strategy_seed, oracle_seed)
+    else:
+        # It's a probe spec: list of (layer_index, n_probes)
+        query_order = probe_then_fwd_queries(widths_list, offsets_list, D, N, strategy_seed, oracle_seed, strategy_spec)
 
     # Track MSE
     is_known = np.zeros(max_qid, dtype=np.bool_)
