@@ -138,6 +138,18 @@ def _estimate_from_layer0(layer0_val, W0, N):
     return total_F / (1 << N)
 
 
+@njit
+def _all_equal(arr):
+    """Check if all elements of an array are equal."""
+    if len(arr) <= 1:
+        return True
+    v0 = arr[0]
+    for i in range(1, len(arr)):
+        if arr[i] != v0:
+            return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Query allocation strategies (pure Python, feeds into numba DP)
 # ---------------------------------------------------------------------------
@@ -479,25 +491,22 @@ def evaluate_single_trial(args):
 
     F_true = compute_F_true(widths, offsets, D, N, oracle_seed)
 
-    # Get query order: strategy_spec is either a string (named strategy) or a list (probe spec)
     if isinstance(strategy_spec, str):
         strat_fn = STRATEGIES[strategy_spec]
         query_order = strat_fn(widths_list, offsets_list, D, N, strategy_seed, oracle_seed)
     else:
-        # It's a probe spec: list of (layer_index, n_probes)
         query_order = probe_then_fwd_queries(widths_list, offsets_list, D, N, strategy_seed, oracle_seed, strategy_spec)
 
-    # Track MSE using incremental DP
     is_known = np.zeros(max_qid, dtype=np.bool_)
     qid_val = np.zeros(max_qid, dtype=np.int32)
-
     mse_list = np.zeros(total_q + 1)
 
-    # Initialize layer_vals: val[layer] = array of per-vertex values
-    # Build initial DP (nothing known)
-    layer_vals = _init_layer_vals(widths, offsets, D, is_known, qid_val, max_qid)
-    est = _estimate_from_layer0(layer_vals[0], widths[0], N)
-    mse_list[0] = (est - F_true) ** 2
+    F_true_sq = F_true * F_true
+    est = 0.0
+    layer_vals = None
+    terminal_known = False
+    # Track deepest layer with a pending (un-DPed) change
+    deepest_pending = -1
 
     qi = 0
     for qid, layer_idx, nv in query_order:
@@ -505,17 +514,45 @@ def evaluate_single_trial(args):
         is_known[qid] = True
         qid_val[qid] = val
         qi += 1
-        # Incremental update: only recompute layers layer_idx down to 0
-        _update_layer_vals(widths, offsets, D, is_known, qid_val, max_qid, layer_vals, layer_idx)
-        est = _estimate_from_layer0(layer_vals[0], widths[0], N)
+
+        if not terminal_known:
+            if layer_idx == D - 1:
+                # First terminal — build full DP
+                terminal_known = True
+                layer_vals = _init_layer_vals(widths, offsets, D, is_known, qid_val, max_qid)
+                est = _estimate_from_layer0(layer_vals[0], widths[0], N)
+                deepest_pending = -1
+            else:
+                # Before any terminal, est = 0
+                if qi < len(mse_list):
+                    mse_list[qi] = F_true_sq
+                continue
+        else:
+            if layer_idx == D - 1:
+                # New terminal sign — always recompute
+                update_from = D - 1
+                if deepest_pending >= 0:
+                    update_from = max(update_from, deepest_pending)
+                _update_layer_vals(widths, offsets, D, is_known, qid_val, max_qid, layer_vals, update_from)
+                est = _estimate_from_layer0(layer_vals[0], widths[0], N)
+                deepest_pending = -1
+            else:
+                # Transition query — batch it, recompute lazily
+                if deepest_pending < 0 or layer_idx > deepest_pending:
+                    deepest_pending = layer_idx
+                # Defer DP until next terminal or we need the estimate
+                # For now, do the update (correctness over speed)
+                _update_layer_vals(widths, offsets, D, is_known, qid_val, max_qid, layer_vals, layer_idx)
+                est = _estimate_from_layer0(layer_vals[0], widths[0], N)
+
         mse = (est - F_true) ** 2
         if qi < len(mse_list):
             mse_list[qi] = mse
         if abs(est - F_true) < 1e-15:
             break
 
-    # Fill tail with final MSE
-    final_mse = (est - F_true) ** 2
+    mse_list[0] = F_true_sq
+    final_mse = (est - F_true) ** 2 if terminal_known else F_true_sq
     for j in range(qi + 1, total_q + 1):
         mse_list[j] = final_mse
 
