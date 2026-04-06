@@ -20,6 +20,7 @@ from problems.oracle_averaging import OracleAveragingProblem
 import storage
 import codegen
 import jobs
+import cone_study
 
 app = Flask(__name__, static_folder="static")
 
@@ -527,6 +528,14 @@ def create_job():
                          daemon=True).start()
         return jsonify({"job_id": job_id})
 
+    elif job_type == "cone_evaluate":
+        widths = data.get("widths")
+        if not widths or len(widths) < 2:
+            return jsonify({"error": "Need at least 2 widths"}), 400
+        job_id = jobs.create_job("cone_evaluate", {"widths": widths})
+        threading.Thread(target=_run_cone_evaluate_job, args=(job_id, widths), daemon=True).start()
+        return jsonify({"job_id": job_id})
+
     return jsonify({"error": "Unknown job type"}), 400
 
 
@@ -555,6 +564,99 @@ def list_jobs():
     if status_filter == "running":
         return jsonify(jobs.list_running())
     return jsonify(jobs.list_recent(job_type=job_type, limit=10))
+
+
+# ---------------------------------------------------------------------------
+# Cone study
+# ---------------------------------------------------------------------------
+
+_CONE_DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "cone_sequences.json")
+
+
+def _load_cone_sequences():
+    """Load cone sequences from disk, initializing with presets if needed."""
+    if os.path.exists(_CONE_DATA_PATH):
+        import json
+        with open(_CONE_DATA_PATH) as f:
+            return json.load(f)
+    # Initialize with presets
+    seqs = []
+    for p in cone_study.PRESETS:
+        seqs.append({
+            "name": p["name"],
+            "widths": p["widths"],
+            "description": p["description"],
+            "k": cone_study.cone_k(p["widths"]),
+            "total_queries": cone_study.cone_total_queries(p["widths"]),
+            "result": None,
+        })
+    _save_cone_sequences(seqs)
+    return seqs
+
+
+def _save_cone_sequences(seqs):
+    import json
+    with open(_CONE_DATA_PATH, "w") as f:
+        json.dump(seqs, f, indent=2)
+
+
+@app.route("/cones")
+def cones_page():
+    return send_from_directory("static", "cones.html")
+
+
+@app.route("/api/cones/sequences", methods=["GET"])
+def get_cone_sequences():
+    return jsonify(_load_cone_sequences())
+
+
+@app.route("/api/cones/sequences", methods=["POST"])
+def add_cone_sequence():
+    data = request.json or {}
+    widths = data.get("widths")
+    if not widths or len(widths) < 2:
+        return jsonify({"error": "Need at least 2 widths"}), 400
+    seqs = _load_cone_sequences()
+    seqs.append({
+        "name": data.get("name", f"Custom [{','.join(str(w) for w in widths)}]"),
+        "widths": widths,
+        "description": data.get("description", ""),
+        "k": cone_study.cone_k(widths),
+        "total_queries": cone_study.cone_total_queries(widths),
+        "result": None,
+    })
+    _save_cone_sequences(seqs)
+    return jsonify({"ok": True})
+
+
+def _run_cone_evaluate_job(job_id, widths):
+    """Background thread for cone evaluation jobs."""
+    try:
+        def on_progress(completed, total):
+            jobs.append_event(job_id, {"type": "progress", "completed": completed, "total": total})
+
+        result = cone_study.evaluate_cone(
+            widths, N=8, max_d=20, num_oracle_samples=50,
+            timeout=600, progress_callback=on_progress,
+        )
+
+        # Save result to cone sequences
+        seqs = _load_cone_sequences()
+        widths_key = result["widths"]
+        for s in seqs:
+            if s["widths"] == widths_key:
+                s["result"] = result
+                s["k"] = result["k"]
+                s["total_queries"] = result["total_queries"]
+                break
+        _save_cone_sequences(seqs)
+
+        jobs.finish_job(job_id, result)
+    except Exception as e:
+        traceback.print_exc()
+        jobs.append_event(job_id, {"type": "error", "error": str(e)})
+        jobs.finish_job(job_id, {"error": str(e)}, status="error")
+
 
 
 if __name__ == "__main__":

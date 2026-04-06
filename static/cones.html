@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Generalized Cone Study</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); padding: 24px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  h2 { font-size: 1.1em; color: var(--muted); margin-bottom: 20px; font-weight: normal; }
+  h3 { font-size: 1em; margin-bottom: 12px; }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .section { background: var(--surface); border: 1px solid var(--border);
+             border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.85em; }
+  th, td { padding: 8px 12px; border: 1px solid var(--border); text-align: left; }
+  th { background: var(--bg); color: var(--muted); font-weight: 500; }
+  td.pass { color: var(--green); }
+  td.fail { color: var(--red); }
+  tr.selected { background: rgba(88,166,255,0.1); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: rgba(88,166,255,0.07); }
+
+  .btn { background: var(--accent); color: #fff; border: none; padding: 8px 14px;
+         border-radius: 6px; cursor: pointer; font-size: 0.85em; font-weight: 500; }
+  .btn:hover { opacity: 0.9; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-sm { padding: 4px 10px; font-size: 0.8em; }
+  .btn-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+  .btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  .custom-form { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .custom-form input { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+                       border-radius: 6px; padding: 6px 10px; font-size: 0.85em; font-family: monospace; width: 300px; }
+  .custom-form label { font-size: 0.85em; color: var(--muted); }
+
+  .status-msg { padding: 8px 12px; border-radius: 6px; font-size: 0.85em; margin-bottom: 12px; }
+  .status-msg.info { background: rgba(88,166,255,0.1); color: var(--accent); }
+  .status-msg.error { background: rgba(248,81,73,0.1); color: var(--red); }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-bar { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin: 4px 0; }
+  .progress-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s ease; }
+
+  .chart-area { margin-top: 12px; }
+  .chart-area canvas { width: 100%; height: 250px; }
+
+  .ed-table { font-size: 0.8em; }
+  .ed-table td { padding: 4px 8px; text-align: right; font-family: monospace; }
+
+  .meta { font-size: 0.82em; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+  <div>
+    <h1>Generalized Cone Study</h1>
+    <h2>Oracle-Averaging Conjecture &mdash; Exact Bayesian Estimation</h2>
+  </div>
+  <a href="/" class="btn btn-secondary">Main Dashboard</a>
+</div>
+
+<div id="statusArea"></div>
+
+<div class="section">
+  <h3>Width Sequences</h3>
+  <p style="color:var(--muted);font-size:0.85em;margin-bottom:12px">
+    Each row is a cone with widths [W_0, W_1, ..., W_{D-1}]. Click a row to see details. Click "Evaluate" to run.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Widths</th>
+        <th>k</th>
+        <th>Total Q</th>
+        <th>Cumul. Risk</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="presetsTable"></tbody>
+  </table>
+
+  <div class="custom-form">
+    <label>Custom:</label>
+    <input id="customWidths" placeholder="e.g. 8,4,2 or 16,16,16,16" />
+    <input id="customName" placeholder="Name (optional)" style="width:180px" />
+    <button class="btn btn-sm" onclick="addCustom()">Add</button>
+  </div>
+</div>
+
+<div class="section" id="detailSection" style="display:none">
+  <h3 id="detailTitle">Details</h3>
+  <div id="detailContent"></div>
+</div>
+
+<div class="section">
+  <h3>Evaluate All</h3>
+  <div class="btn-row">
+    <button class="btn" id="evalAllBtn" onclick="evalAll()">Evaluate All Missing</button>
+    <span class="meta" id="evalAllStatus"></span>
+  </div>
+</div>
+
+<script>
+const API = '';
+let sequences = [];  // {name, widths, description, result}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function showStatus(html, type) {
+  document.getElementById('statusArea').innerHTML = `<div class="status-msg ${type}">${html}</div>`;
+}
+
+async function api(path, opts) {
+  try {
+    const r = await fetch(API + path, opts);
+    return await r.json();
+  } catch (e) { console.error('API error:', path, e); return {}; }
+}
+
+async function init() {
+  // Load presets and any stored results
+  const data = await api('/api/cones/sequences');
+  if (Array.isArray(data)) sequences = data;
+  render();
+
+  // Resume any running jobs
+  const jobs = await api('/api/jobs');
+  if (Array.isArray(jobs)) {
+    for (const job of jobs) {
+      if (job.type === 'cone_evaluate' && job.status === 'running') {
+        const widthsKey = JSON.stringify(job.params?.widths);
+        const idx = sequences.findIndex(s => JSON.stringify(s.widths) === widthsKey);
+        if (idx >= 0) pollConeJob(job.id, idx);
+      }
+    }
+  }
+}
+
+function render() {
+  const tbody = document.getElementById('presetsTable');
+  tbody.innerHTML = sequences.map((s, i) => {
+    const r = s.result;
+    const risk = r ? r.cumulative_risk.toFixed(4) : '—';
+    const cls = r ? (r.conjecture_holds ? 'pass' : 'fail') : '';
+    const status = r ? (r.conjecture_holds ? 'PASS' : 'FAIL') : '';
+    return `<tr onclick="showDetail(${i})" class="${s._selected ? 'selected' : ''}">
+      <td>${esc(s.name)}</td>
+      <td style="font-family:monospace;font-size:0.82em">[${s.widths.join(', ')}]</td>
+      <td>${s.k || '—'}</td>
+      <td>${s.total_queries || '—'}</td>
+      <td class="${cls}" id="risk-${i}">${risk}</td>
+      <td class="${cls}">${status}</td>
+      <td><button class="btn btn-sm" onclick="event.stopPropagation();evalOne(${i})" id="evalBtn-${i}">Evaluate</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function showDetail(idx) {
+  sequences.forEach((s, i) => s._selected = (i === idx));
+  render();
+
+  const s = sequences[idx];
+  const section = document.getElementById('detailSection');
+  section.style.display = 'block';
+  document.getElementById('detailTitle').textContent = s.name;
+
+  let html = `<p style="font-size:0.85em;color:var(--muted)">${esc(s.description || '')}</p>`;
+  html += `<p class="meta">Widths: [${s.widths.join(', ')}] &middot; k=${s.k || '?'} &middot; Total queries: ${s.total_queries || '?'}</p>`;
+
+  if (s.result) {
+    const r = s.result;
+    html += `<p class="meta">Trials: ${r.trials_completed}/${r.num_oracle_samples} &middot; N=${r.N} &middot; max_d=${r.max_d}</p>`;
+    html += `<h3 style="margin-top:16px">E_d by stage</h3>`;
+    html += `<table class="ed-table"><thead><tr><th>d</th><th>E_d</th><th>Cumulative</th></tr></thead><tbody>`;
+    let cumul = 0;
+    for (let d = 0; d < r.Ed.length; d++) {
+      cumul += r.Ed[d];
+      html += `<tr><td>${d + 1}</td><td>${r.Ed[d].toFixed(6)}</td><td>${cumul.toFixed(6)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  document.getElementById('detailContent').innerHTML = html;
+}
+
+function addCustom() {
+  const input = document.getElementById('customWidths').value.trim();
+  const name = document.getElementById('customName').value.trim();
+  if (!input) return;
+
+  const widths = input.split(',').map(s => parseInt(s.trim())).filter(w => w > 0 && !isNaN(w));
+  if (widths.length < 2) return showStatus('Need at least 2 widths', 'error');
+
+  sequences.push({
+    name: name || `Custom [${widths.join(',')}]`,
+    widths: widths,
+    description: 'User-defined width sequence',
+    result: null,
+  });
+
+  // Save to server
+  api('/api/cones/sequences', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name: name || `Custom [${widths.join(',')}]`, widths, description: 'User-defined width sequence' }),
+  });
+
+  document.getElementById('customWidths').value = '';
+  document.getElementById('customName').value = '';
+  render();
+}
+
+async function evalOne(idx) {
+  const s = sequences[idx];
+  const btn = document.getElementById(`evalBtn-${idx}`);
+  btn.disabled = true;
+  btn.textContent = '...';
+  document.getElementById(`risk-${idx}`).innerHTML = '<span class="spinner"></span>';
+  showStatus(`<span class="spinner"></span> Evaluating [${s.widths.join(', ')}]...`, 'info');
+
+  try {
+    const r = await api('/api/jobs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ type: 'cone_evaluate', widths: s.widths }),
+    });
+    if (r.error) throw new Error(r.error);
+    pollConeJob(r.job_id, idx);
+  } catch (e) {
+    showStatus(`Error: ${e.message}`, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Evaluate';
+  }
+}
+
+function pollConeJob(jobId, idx) {
+  let seen = 0;
+  const interval = setInterval(async () => {
+    const r = await api(`/api/jobs/${jobId}?after=${seen}`);
+    if (r.error) { clearInterval(interval); return; }
+
+    for (const evt of (r.events || [])) {
+      seen++;
+      if (evt.type === 'progress') {
+        const riskCell = document.getElementById(`risk-${idx}`);
+        if (riskCell) riskCell.textContent = `${evt.completed}/${evt.total}`;
+      }
+    }
+
+    if (r.status === 'done' || r.status === 'error') {
+      clearInterval(interval);
+      const btn = document.getElementById(`evalBtn-${idx}`);
+      if (btn) { btn.disabled = false; btn.textContent = 'Evaluate'; }
+
+      if (r.status === 'done' && r.result) {
+        sequences[idx].result = r.result;
+        sequences[idx].k = r.result.k;
+        sequences[idx].total_queries = r.result.total_queries;
+        showStatus(`Done: [${sequences[idx].widths.join(', ')}] cumulative risk = ${r.result.cumulative_risk.toFixed(4)}`, 'info');
+      } else if (r.status === 'error') {
+        showStatus(`Error evaluating [${sequences[idx].widths.join(', ')}]`, 'error');
+      }
+      render();
+    }
+  }, 2000);
+}
+
+async function evalAll() {
+  const btn = document.getElementById('evalAllBtn');
+  btn.disabled = true;
+  let count = 0;
+  for (let i = 0; i < sequences.length; i++) {
+    if (!sequences[i].result) {
+      await evalOne(i);
+      count++;
+      // Small delay between launches
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  document.getElementById('evalAllStatus').textContent = count === 0 ? 'All already evaluated' : `Started ${count} evaluations`;
+  btn.disabled = false;
+}
+
+init();
+</script>
+</body>
+</html>
