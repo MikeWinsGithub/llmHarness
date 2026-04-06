@@ -201,6 +201,161 @@ def _s90x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os,
 # Strategy registry
 # ---------------------------------------------------------------------------
 
+def multi_pass_fwd_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Multiple passes: each pass traces all inputs, one query per input per pass."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    for _pass in range(D + 1):
+        made_progress = False
+        for x_int in rng.permutation(1 << N):
+            v = int(x_int) % widths[0]
+            for layer in range(D - 1):
+                qid = offsets[layer] + v
+                nv = widths[layer + 1]
+                if qid not in known:
+                    order.append((qid, layer, nv))
+                    _oq_helper(known, oracle_seed, qid, nv)
+                    made_progress = True
+                    break
+                v = known[qid]
+            else:
+                qid = offsets[D - 1] + v
+                if qid not in known:
+                    order.append((qid, D - 1, 2))
+                    _oq_helper(known, oracle_seed, qid, 2)
+                    made_progress = True
+        if not made_progress:
+            break
+    return order
+
+
+def breadth_first_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Cycle through all inputs, reveal one query per input per round."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    input_order = list(rng.permutation(1 << N))
+    for _round in range(D + 1):
+        for x_int in input_order:
+            v = int(x_int) % widths[0]
+            for layer in range(D - 1):
+                qid = offsets[layer] + v
+                nv = widths[layer + 1]
+                if qid not in known:
+                    order.append((qid, layer, nv))
+                    _oq_helper(known, oracle_seed, qid, nv)
+                    break
+                v = known[qid]
+            else:
+                qid = offsets[D - 1] + v
+                if qid not in known:
+                    order.append((qid, D - 1, 2))
+                    _oq_helper(known, oracle_seed, qid, 2)
+    return order
+
+
+def popular_first_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Fwd-merge but explore most common starting vertices first."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    counts = {}
+    for x_int in range(1 << N):
+        v = x_int % widths[0]
+        counts[v] = counts.get(v, 0) + 1
+    inputs = list(range(1 << N))
+    rng.shuffle(inputs)
+    inputs.sort(key=lambda x: -counts[x % widths[0]])
+    for x_int in inputs:
+        v = int(x_int) % widths[0]
+        for layer in range(D - 1):
+            qid = offsets[layer] + v
+            nv = widths[layer + 1]
+            if qid not in known:
+                order.append((qid, layer, nv))
+            v = _oq_helper(known, oracle_seed, qid, nv)
+        qid = offsets[D - 1] + v
+        if qid not in known:
+            order.append((qid, D - 1, 2))
+            _oq_helper(known, oracle_seed, qid, 2)
+    return order
+
+
+def rare_first_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Fwd-merge but explore rarest starting vertices first."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    counts = {}
+    for x_int in range(1 << N):
+        v = x_int % widths[0]
+        counts[v] = counts.get(v, 0) + 1
+    inputs = list(range(1 << N))
+    rng.shuffle(inputs)
+    inputs.sort(key=lambda x: counts[x % widths[0]])
+    for x_int in inputs:
+        v = int(x_int) % widths[0]
+        for layer in range(D - 1):
+            qid = offsets[layer] + v
+            nv = widths[layer + 1]
+            if qid not in known:
+                order.append((qid, layer, nv))
+            v = _oq_helper(known, oracle_seed, qid, nv)
+        qid = offsets[D - 1] + v
+        if qid not in known:
+            order.append((qid, D - 1, 2))
+            _oq_helper(known, oracle_seed, qid, 2)
+    return order
+
+
+def interleaved_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Alternate: trace one input forward, then probe one random terminal vertex."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    inputs = list(rng.permutation(1 << N))
+    back_verts = list(rng.permutation(widths[D - 1]))
+    ii, bi = 0, 0
+    while ii < len(inputs) or bi < len(back_verts):
+        if ii < len(inputs):
+            x_int = int(inputs[ii]); ii += 1
+            v = x_int % widths[0]
+            for layer in range(D - 1):
+                qid = offsets[layer] + v
+                nv = widths[layer + 1]
+                if qid not in known:
+                    order.append((qid, layer, nv))
+                v = _oq_helper(known, oracle_seed, qid, nv)
+            qid = offsets[D - 1] + v
+            if qid not in known:
+                order.append((qid, D - 1, 2))
+                _oq_helper(known, oracle_seed, qid, 2)
+        if bi < len(back_verts):
+            v = int(back_verts[bi]); bi += 1
+            qid = offsets[D - 1] + v
+            if qid not in known:
+                order.append((qid, D - 1, 2))
+                _oq_helper(known, oracle_seed, qid, 2)
+    return order
+
+
+def two_pass_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Pass 1: reveal only layer 0. Pass 2: full fwd-merge (layer 0 already cached)."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    for x_int in rng.permutation(1 << N):
+        v = int(x_int) % widths[0]
+        qid = offsets[0] + v
+        nv = widths[1]
+        if qid not in known:
+            order.append((qid, 0, nv))
+            _oq_helper(known, oracle_seed, qid, nv)
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
+    return order
+
+
 STRATEGIES = {
     "fwd-merge": fwd_merge_queries,
     "blind-1/4+fwd": blind_quarter_then_fwd_queries,
@@ -211,6 +366,12 @@ STRATEGIES = {
     "s67%x1+fwd": _s67x1, "s67%x3+fwd": _s67x3, "s67%x5+fwd": _s67x5,
     "s75%x1+fwd": _s75x1, "s75%x3+fwd": _s75x3, "s75%x5+fwd": _s75x5,
     "s90%x1+fwd": _s90x1, "s90%x3+fwd": _s90x3, "s90%x5+fwd": _s90x5,
+    "multi-pass": multi_pass_fwd_queries,
+    "breadth-1st": breadth_first_queries,
+    "popular-1st": popular_first_queries,
+    "rare-1st": rare_first_queries,
+    "interleaved": interleaved_queries,
+    "two-pass": two_pass_queries,
 }
 
 
