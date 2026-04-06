@@ -307,6 +307,193 @@ def evaluate_cone(
 
 
 # ---------------------------------------------------------------------------
+# Sequential (one-query-at-a-time) evaluation
+# ---------------------------------------------------------------------------
+
+def _greedy_next_query(widths, oracle, queried, N):
+    """Pick the single query location that minimizes expected MSE after revealing it.
+
+    For each unqueried location qid, compute the expected MSE if we reveal it
+    (averaging over possible oracle values), and pick the one with lowest expected MSE.
+    """
+    D = len(widths)
+    offsets = [sum(widths[:i]) for i in range(D)]
+    total_q = cone_total_queries(widths)
+
+    best_qid = None
+    best_expected_mse = float('inf')
+
+    for qid in range(total_q):
+        if qid in queried:
+            continue
+
+        # Determine which layer and vertex this qid belongs to
+        layer = None
+        for l in range(D):
+            if offsets[l] <= qid < offsets[l] + widths[l]:
+                layer = l
+                break
+
+        if layer is None:
+            continue
+
+        # How many possible values can this query take?
+        if layer < D - 1:
+            num_vals = widths[layer + 1]
+        else:
+            num_vals = 2  # terminal sign query
+
+        # Compute expected MSE after revealing this query
+        # = (1/num_vals) * sum over possible values of MSE(queried + {qid: val})
+        expected_mse = 0.0
+        for val in range(num_vals):
+            oracle._values[qid] = val
+            new_queried = queried | {qid}
+            est = _exact_bayesian_estimate(widths, oracle, new_queried, N)
+            expected_mse += est ** 2  # MSE around 0... no, we need (est - F)^2
+            # But we don't know F! We want E_O[(est - F)^2] which we can't compute here.
+            # Actually for greedy: we want to minimize the posterior variance.
+            # The posterior variance = E[F^2 | known] - (E[F | known])^2
+            # A simpler proxy: the variance of the estimate under remaining uncertainty.
+            # For now, just minimize the variance of the Bayesian estimate.
+
+        # Actually, the right thing: we want to minimize E[(est - F)^2 | known so far]
+        # which equals Var(F | known so far). The greedy approach picks the query
+        # that maximally reduces this variance.
+        # Var(F | known) = E[F^2 | known] - (E[F | known])^2
+        # After revealing qid with value v: Var(F | known + {qid:v})
+        # Expected reduction = Var(F|known) - E_v[Var(F | known + {qid:v})]
+
+        # Simpler: just compute E_v[(E[F|known+{qid:v}])^2] - this is what we maximize
+        # (higher means more variance reduction)
+        sum_est_sq = 0.0
+        for val in range(num_vals):
+            oracle._values[qid] = val
+            new_queried = queried | {qid}
+            est = _exact_bayesian_estimate(widths, oracle, new_queried, N)
+            sum_est_sq += est ** 2
+        mean_est_sq = sum_est_sq / num_vals
+
+        # We want to MAXIMIZE mean_est_sq (= maximize variance reduction)
+        if best_qid is None or mean_est_sq > best_expected_mse:
+            best_expected_mse = mean_est_sq
+            best_qid = qid
+
+    # Clean up: remove the test values we set
+    if best_qid is not None and best_qid not in queried:
+        oracle._values.pop(best_qid, None)
+
+    return best_qid
+
+
+def evaluate_cone_sequential(
+    widths,
+    N=8,
+    num_oracle_samples=50,
+    seed=42,
+    timeout=600,
+    greedy=True,
+    progress_callback=None,
+):
+    """Evaluate the sequential conjecture: ∑_{i=0}^{total_q} MSE_i ≤ k.
+
+    Reveals oracle values one at a time. If greedy=True, picks the query
+    that maximally reduces posterior variance. Otherwise uses a fixed order
+    (layer by layer, vertex by vertex).
+
+    Returns dict with MSE_i curve and cumulative sum.
+    """
+    k = cone_k(widths)
+    total_q = cone_total_queries(widths)
+    D = len(widths)
+    offsets = [sum(widths[:i]) for i in range(D)]
+
+    rng = np.random.default_rng(seed)
+    # MSE after 0, 1, 2, ... queries
+    mse_accum = np.zeros(total_q + 1)
+    trials_completed = 0
+    deadline = time.monotonic() + timeout
+
+    for trial in range(num_oracle_samples):
+        if time.monotonic() >= deadline:
+            break
+
+        oracle_seed = int(rng.integers(0, 2 ** 62))
+
+        # Compute F_true
+        truth_oracle = Oracle(seed=oracle_seed)
+        F_true = 0.0
+        for x_int in range(2 ** N):
+            x = np.array([(x_int >> bit) & 1 for bit in range(N)], dtype=np.int8)
+            F_true += run_cone_on_input(x, widths, truth_oracle)
+        F_true /= 2 ** N
+
+        # Sequential reveal
+        stage_oracle = Oracle(seed=oracle_seed)
+        queried = set()
+
+        # MSE with 0 queries
+        est = _exact_bayesian_estimate(widths, stage_oracle, queried, N)
+        mse_accum[0] += (est - F_true) ** 2
+
+        if greedy:
+            for i in range(total_q):
+                if time.monotonic() >= deadline:
+                    break
+                # Greedy: pick best next query
+                qid = _greedy_next_query(widths, stage_oracle, queried, N)
+                if qid is None:
+                    break
+                # Reveal it with the true value
+                stage_oracle.query(qid, num_values=(widths[_qid_layer(qid, widths, offsets) + 1] if _qid_layer(qid, widths, offsets) < D - 1 else 2))
+                queried.add(qid)
+                est = _exact_bayesian_estimate(widths, stage_oracle, queried, N)
+                mse_accum[i + 1] += (est - F_true) ** 2
+        else:
+            # Fixed order: layer 0 vertices, layer 1 vertices, ...
+            for qid in range(total_q):
+                if time.monotonic() >= deadline:
+                    break
+                layer = _qid_layer(qid, widths, offsets)
+                num_vals = widths[layer + 1] if layer < D - 1 else 2
+                stage_oracle.query(qid, num_values=num_vals)
+                queried.add(qid)
+                est = _exact_bayesian_estimate(widths, stage_oracle, queried, N)
+                mse_accum[qid + 1] += (est - F_true) ** 2
+
+        trials_completed += 1
+        if progress_callback:
+            progress_callback(trials_completed, num_oracle_samples)
+
+    if trials_completed == 0:
+        return {"widths": widths, "k": k, "error": "Timed out"}
+
+    mse = (mse_accum / trials_completed).tolist()
+    cumulative = sum(mse)
+
+    return {
+        "widths": widths,
+        "k": k,
+        "total_queries": total_q,
+        "N": N,
+        "num_oracle_samples": num_oracle_samples,
+        "trials_completed": trials_completed,
+        "mse_per_query": mse,
+        "cumulative_mse": round(cumulative, 6),
+        "conjecture_holds": cumulative <= k + 1e-6,
+        "greedy": greedy,
+    }
+
+
+def _qid_layer(qid, widths, offsets):
+    """Which layer does query location qid belong to?"""
+    for l in range(len(widths)):
+        if offsets[l] <= qid < offsets[l] + widths[l]:
+            return l
+    return len(widths) - 1
+
+
+# ---------------------------------------------------------------------------
 # Preset width sequences
 # ---------------------------------------------------------------------------
 
