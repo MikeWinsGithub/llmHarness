@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Funnel Conjecture: ∑MSE_i / k by Strategy</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3; padding: 24px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.3em; margin-bottom: 4px; }
+  h2 { font-size: 0.95em; color: #8b949e; font-weight: normal; margin-bottom: 20px; }
+  canvas { width: 100%; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-size: 0.85em; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 14px; height: 14px; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.82em; margin-top: 20px; }
+  th, td { padding: 6px 10px; border: 1px solid #30363d; text-align: right; }
+  th { background: #161b22; color: #8b949e; text-align: center; }
+  td.best { color: #3fb950; font-weight: bold; }
+  td.fail { color: #f85149; }
+  a { color: #58a6ff; }
+</style>
+</head>
+<body>
+<h1>Sequential Conjecture on Funnels [2D, 2D-1, ..., D+1]</h1>
+<h2>Conjecture: ∑<sub>i=0</sub><sup>∞</sup> MSE(Bayesian after i queries) ≤ k &nbsp;&mdash;&nbsp; ratio = ∑MSE / k, want ≤ 1</h2>
+
+<canvas id="chart" height="400"></canvas>
+<div class="legend" id="legend"></div>
+
+<table id="dataTable"></table>
+
+<p style="margin-top:16px"><a href="/cones">Back to Cone Dashboard</a></p>
+
+<script>
+const DATA = {
+  5:  {k:5,  "fwd-merge":0.9486, "blind-last":2.7675, "blind-rev":1.391,  "blind-mid":1.4765, "blind-3/4":2.0737},
+  6:  {k:6,  "fwd-merge":0.9245, "blind-last":3.4411, "blind-rev":1.6076, "blind-mid":1.8591, "blind-3/4":2.75},
+  7:  {k:7,  "fwd-merge":0.9436, "blind-last":4.2419, "blind-rev":1.8038, "blind-mid":1.915,  "blind-3/4":3.1826},
+  8:  {k:8,  "fwd-merge":0.9634, "blind-last":4.6444, "blind-rev":2.0675, "blind-mid":2.5721, "blind-3/4":3.7837},
+  9:  {k:9,  "fwd-merge":1.0448, "blind-last":6.3126, "blind-rev":2.2866, "blind-mid":2.2046, "blind-3/4":3.6454},
+  10: {k:10, "fwd-merge":1.0072, "blind-last":6.6894, "blind-rev":2.7259, "blind-mid":3.102,  "blind-3/4":4.6668},
+  11: {k:11, "fwd-merge":1.0366, "blind-last":7.4288, "blind-rev":2.9312, "blind-mid":3.0228, "blind-3/4":5.4503},
+  12: {k:12, "fwd-merge":1.118,  "blind-last":8.6457, "blind-rev":3.2178, "blind-mid":3.6587, "blind-3/4":6.0278},
+  13: {k:13, "fwd-merge":1.1099, "blind-last":8.8843, "blind-rev":3.5939, "blind-mid":3.5394, "blind-3/4":6.3053},
+  14: {k:14, "fwd-merge":1.0524, "blind-last":9.8332, "blind-rev":3.6283, "blind-mid":4.1898, "blind-3/4":6.1114},
+  15: {k:15, "fwd-merge":1.0308, "blind-last":11.4135,"blind-rev":4.1908, "blind-mid":4.252,  "blind-3/4":7.1308},
+  16: {k:16, "fwd-merge":1.0393, "blind-last":11.0551,"blind-rev":3.7513, "blind-mid":4.1571, "blind-3/4":7.0938},
+  17: {k:17, "fwd-merge":0.9917, "blind-last":11.2302,"blind-rev":4.5876, "blind-mid":5.1619, "blind-3/4":7.7066},
+  18: {k:18, "fwd-merge":1.117,  "blind-last":13.1918,"blind-rev":4.5073, "blind-mid":4.9828, "blind-3/4":7.5561},
+  19: {k:19, "fwd-merge":1.0299, "blind-last":14.2431,"blind-rev":4.3344, "blind-mid":3.8809, "blind-3/4":8.3537},
+  20: {k:20, "fwd-merge":1.0669, "blind-last":12.3751,"blind-rev":4.665,  "blind-mid":4.9611, "blind-3/4":9.3293},
+};
+
+const STRATS = ["fwd-merge", "blind-rev", "blind-mid", "blind-3/4", "blind-last"];
+const COLORS = {
+  "fwd-merge":  "#58a6ff",
+  "blind-last":  "#f85149",
+  "blind-rev":   "#d29922",
+  "blind-mid":   "#bc8cff",
+  "blind-3/4":   "#ff7b72",
+};
+const Ds = Object.keys(DATA).map(Number).sort((a,b) => a-b);
+
+// --- Draw chart ---
+const canvas = document.getElementById('chart');
+const ctx = canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 1;
+canvas.width = canvas.clientWidth * dpr;
+canvas.height = canvas.clientHeight * dpr;
+ctx.scale(dpr, dpr);
+const W = canvas.clientWidth, H = canvas.clientHeight;
+const pad = {top: 30, right: 20, bottom: 40, left: 55};
+const plotW = W - pad.left - pad.right;
+const plotH = H - pad.top - pad.bottom;
+
+// Only show fwd-merge, blind-rev, blind-mid (skip the obviously bad ones for readability)
+const SHOW = ["fwd-merge", "blind-rev", "blind-mid"];
+const maxRatio = 5;  // cap y-axis
+
+function xPos(D) { return pad.left + (D - Ds[0]) / (Ds[Ds.length-1] - Ds[0]) * plotW; }
+function yPos(r) { return pad.top + (1 - r / maxRatio) * plotH; }
+
+// Grid
+ctx.strokeStyle = '#30363d';
+ctx.lineWidth = 0.5;
+for (let r = 0; r <= maxRatio; r += 1) {
+  const y = yPos(r);
+  ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText(r.toString(), pad.left - 6, y + 4);
+}
+for (const D of Ds) {
+  const x = xPos(D);
+  ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke();
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(D.toString(), x, H - pad.bottom + 16);
+}
+
+// Threshold line at ratio=1
+ctx.strokeStyle = '#3fb950';
+ctx.lineWidth = 2;
+ctx.setLineDash([6, 4]);
+ctx.beginPath(); ctx.moveTo(pad.left, yPos(1)); ctx.lineTo(W - pad.right, yPos(1)); ctx.stroke();
+ctx.setLineDash([]);
+ctx.fillStyle = '#3fb950'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+ctx.fillText('conjecture bound (ratio = 1)', pad.left + 4, yPos(1) - 6);
+
+// Axis labels
+ctx.fillStyle = '#e6edf3'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+ctx.fillText('D (funnel depth)', W / 2, H - 4);
+ctx.save(); ctx.translate(14, H / 2); ctx.rotate(-Math.PI / 2);
+ctx.fillText('∑MSE / k', 0, 0); ctx.restore();
+
+// Plot lines
+for (const sname of STRATS) {
+  ctx.strokeStyle = COLORS[sname];
+  ctx.lineWidth = sname === 'fwd-merge' ? 3 : 1.5;
+  ctx.globalAlpha = SHOW.includes(sname) ? 1 : 0.25;
+  ctx.beginPath();
+  let first = true;
+  for (const D of Ds) {
+    const r = Math.min(DATA[D][sname], maxRatio);
+    const x = xPos(D), y = yPos(r);
+    if (first) { ctx.moveTo(x, y); first = false; } else { ctx.lineTo(x, y); }
+  }
+  ctx.stroke();
+  // Dots
+  for (const D of Ds) {
+    const r = Math.min(DATA[D][sname], maxRatio);
+    ctx.beginPath(); ctx.arc(xPos(D), yPos(r), 3, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Legend
+const legend = document.getElementById('legend');
+for (const sname of STRATS) {
+  const item = document.createElement('div');
+  item.className = 'legend-item';
+  item.innerHTML = `<div class="legend-swatch" style="background:${COLORS[sname]};opacity:${SHOW.includes(sname)?1:0.3}"></div>${sname}`;
+  legend.appendChild(item);
+}
+
+// Data table
+let html = '<thead><tr><th>D</th><th>k</th>';
+for (const s of STRATS) html += `<th>${s}</th>`;
+html += '</tr></thead><tbody>';
+for (const D of Ds) {
+  const row = DATA[D];
+  const vals = STRATS.map(s => row[s]);
+  const best = Math.min(...vals);
+  html += `<tr><td style="text-align:center">${D}</td><td style="text-align:center">${row.k}</td>`;
+  for (const s of STRATS) {
+    const v = row[s];
+    const cls = v === best ? 'best' : v > 1 ? 'fail' : '';
+    html += `<td class="${cls}">${v.toFixed(4)}</td>`;
+  }
+  html += '</tr>';
+}
+html += '</tbody>';
+document.getElementById('dataTable').innerHTML = html;
+</script>
+</body>
+</html>

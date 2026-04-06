@@ -605,6 +605,11 @@ def cones_page():
     return send_from_directory("static", "cones.html")
 
 
+@app.route("/cones/funnels")
+def funnel_chart_page():
+    return send_from_directory("static", "funnel_chart.html")
+
+
 @app.route("/api/cones/sequences", methods=["GET"])
 def get_cone_sequences():
     return jsonify(_load_cone_sequences())
