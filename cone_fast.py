@@ -73,6 +73,72 @@ def bayesian_estimate(widths, offsets, D, N, is_known, qid_val, max_qid):
 
 
 # ---------------------------------------------------------------------------
+# Incremental DP
+# ---------------------------------------------------------------------------
+
+@njit
+def _compute_layer_val(widths, offsets, D, is_known, qid_val, max_qid, layer, next_layer_val):
+    """Compute val array for a single layer given the next layer's val array."""
+    W = widths[layer]
+    W_next = widths[layer + 1]
+    val = np.zeros(W, dtype=np.float64)
+    for v in range(W):
+        qid = offsets[layer] + v
+        if qid < max_qid and is_known[qid]:
+            next_v = qid_val[qid]
+            val[v] = next_layer_val[next_v]
+        else:
+            total = 0.0
+            for nv in range(W_next):
+                total += next_layer_val[nv]
+            val[v] = total / W_next
+    return val
+
+
+@njit
+def _compute_terminal_val(widths, offsets, D, is_known, qid_val, max_qid):
+    """Compute val array for the terminal layer."""
+    W = widths[D - 1]
+    val = np.zeros(W, dtype=np.float64)
+    for v in range(W):
+        qid = offsets[D - 1] + v
+        if qid < max_qid and is_known[qid]:
+            val[v] = 1.0 if qid_val[qid] == 1 else -1.0
+    return val
+
+
+def _init_layer_vals(widths, offsets, D, is_known, qid_val, max_qid):
+    """Build all layer val arrays from scratch."""
+    layer_vals = [None] * D
+    layer_vals[D - 1] = _compute_terminal_val(widths, offsets, D, is_known, qid_val, max_qid)
+    for layer in range(D - 2, -1, -1):
+        layer_vals[layer] = _compute_layer_val(widths, offsets, D, is_known, qid_val, max_qid, layer, layer_vals[layer + 1])
+    return layer_vals
+
+
+def _update_layer_vals(widths, offsets, D, is_known, qid_val, max_qid, layer_vals, changed_layer):
+    """Recompute layer vals from changed_layer up to layer 0."""
+    if changed_layer == D - 1:
+        layer_vals[D - 1] = _compute_terminal_val(widths, offsets, D, is_known, qid_val, max_qid)
+    else:
+        layer_vals[changed_layer] = _compute_layer_val(widths, offsets, D, is_known, qid_val, max_qid, changed_layer, layer_vals[changed_layer + 1])
+    for layer in range(changed_layer - 1, -1, -1):
+        layer_vals[layer] = _compute_layer_val(widths, offsets, D, is_known, qid_val, max_qid, layer, layer_vals[layer + 1])
+
+
+@njit
+def _estimate_from_layer0(layer0_val, W0, N):
+    """Compute F estimate from layer 0 values."""
+    total_F = 0.0
+    count_per = (1 << N) // W0
+    remainder = (1 << N) % W0
+    for v0 in range(W0):
+        c = count_per + (1 if v0 < remainder else 0)
+        total_F += layer0_val[v0] * c
+    return total_F / (1 << N)
+
+
+# ---------------------------------------------------------------------------
 # Query allocation strategies (pure Python, feeds into numba DP)
 # ---------------------------------------------------------------------------
 
@@ -421,23 +487,27 @@ def evaluate_single_trial(args):
         # It's a probe spec: list of (layer_index, n_probes)
         query_order = probe_then_fwd_queries(widths_list, offsets_list, D, N, strategy_seed, oracle_seed, strategy_spec)
 
-    # Track MSE
+    # Track MSE using incremental DP
     is_known = np.zeros(max_qid, dtype=np.bool_)
     qid_val = np.zeros(max_qid, dtype=np.int32)
 
     mse_list = np.zeros(total_q + 1)
 
-    # MSE before any queries
-    est = bayesian_estimate(widths, offsets, D, N, is_known, qid_val, max_qid)
+    # Initialize layer_vals: val[layer] = array of per-vertex values
+    # Build initial DP (nothing known)
+    layer_vals = _init_layer_vals(widths, offsets, D, is_known, qid_val, max_qid)
+    est = _estimate_from_layer0(layer_vals[0], widths[0], N)
     mse_list[0] = (est - F_true) ** 2
 
     qi = 0
-    for qid, layer, nv in query_order:
+    for qid, layer_idx, nv in query_order:
         val = oracle_query_single(oracle_seed, qid, nv)
         is_known[qid] = True
         qid_val[qid] = val
         qi += 1
-        est = bayesian_estimate(widths, offsets, D, N, is_known, qid_val, max_qid)
+        # Incremental update: only recompute layers layer_idx down to 0
+        _update_layer_vals(widths, offsets, D, is_known, qid_val, max_qid, layer_vals, layer_idx)
+        est = _estimate_from_layer0(layer_vals[0], widths[0], N)
         mse = (est - F_true) ** 2
         if qi < len(mse_list):
             mse_list[qi] = mse
