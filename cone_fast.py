@@ -76,18 +76,14 @@ def bayesian_estimate(widths, offsets, D, N, is_known, qid_val, max_qid):
 # Query allocation strategies (pure Python, feeds into numba DP)
 # ---------------------------------------------------------------------------
 
-def fwd_merge_queries(widths, offsets, D, N, seed, oracle_seed, budget=None):
-    """Forward merge: trace random inputs, yield (qid, layer, num_values) tuples in order."""
-    rng = np.random.default_rng(seed)
-    # Build oracle values on demand
-    known = {}
+def _oq_helper(known, oracle_seed, qid, nv):
+    if qid not in known:
+        known[qid] = oracle_query_single(oracle_seed, qid, nv)
+    return known[qid]
 
-    def oq(qid, nv):
-        if qid not in known:
-            known[qid] = oracle_query_single(oracle_seed, qid, nv)
-        return known[qid]
 
-    order = []
+def _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order):
+    """Trace random inputs from layer 0 forward. Appends to order list."""
     for x_int in rng.permutation(1 << N):
         v = int(x_int) % widths[0]
         for layer in range(D - 1):
@@ -95,12 +91,76 @@ def fwd_merge_queries(widths, offsets, D, N, seed, oracle_seed, budget=None):
             nv = widths[layer + 1]
             if qid not in known:
                 order.append((qid, layer, nv))
-            v = oq(qid, nv)
+            v = _oq_helper(known, oracle_seed, qid, nv)
         qid = offsets[D - 1] + v
         if qid not in known:
             order.append((qid, D - 1, 2))
-            oq(qid, 2)
+            _oq_helper(known, oracle_seed, qid, 2)
+
+
+def fwd_merge_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Forward merge: trace random inputs layer 0 -> terminal."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
     return order
+
+
+def blind_quarter_then_fwd_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Reveal all vertices at layer D//4, then fwd-merge the rest.
+    The D//4 layer is near the start (narrow end for widening cones, wide for narrowing)."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    target_layer = max(0, D // 4)
+    # Reveal all vertices at target layer
+    for v in range(widths[target_layer]):
+        qid = offsets[target_layer] + v
+        nv = widths[target_layer + 1] if target_layer < D - 1 else 2
+        if qid not in known:
+            order.append((qid, target_layer, nv))
+            _oq_helper(known, oracle_seed, qid, nv)
+    # Then fwd-merge
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
+    return order
+
+
+def sample_third_then_fwd_queries(widths, offsets, D, N, seed, oracle_seed):
+    """Trace ONE random input starting from layer D//3 to the terminal,
+    then fwd-merge everything from the start."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    start_layer = max(0, D // 3)
+
+    # Pick one random vertex at start_layer and trace forward
+    v = int(rng.integers(0, widths[start_layer]))
+    for layer in range(start_layer, D - 1):
+        qid = offsets[layer] + v
+        nv = widths[layer + 1]
+        if qid not in known:
+            order.append((qid, layer, nv))
+        v = _oq_helper(known, oracle_seed, qid, nv)
+    qid = offsets[D - 1] + v
+    if qid not in known:
+        order.append((qid, D - 1, 2))
+        _oq_helper(known, oracle_seed, qid, 2)
+
+    # Then fwd-merge from the start
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
+    return order
+
+
+# ---------------------------------------------------------------------------
+# Strategy registry
+# ---------------------------------------------------------------------------
+
+STRATEGIES = {
+    "fwd-merge": fwd_merge_queries,
+    "blind-1/4+fwd": blind_quarter_then_fwd_queries,
+    "sample-1/3+fwd": sample_third_then_fwd_queries,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +169,7 @@ def fwd_merge_queries(widths, offsets, D, N, seed, oracle_seed, budget=None):
 
 def evaluate_single_trial(args):
     """Run a single trial. Designed for multiprocessing."""
-    widths_list, offsets_list, D, N, oracle_seed, strategy_seed = args
+    widths_list, offsets_list, D, N, oracle_seed, strategy_seed, strategy_name = args
     widths = np.array(widths_list, dtype=np.int32)
     offsets = np.array(offsets_list, dtype=np.int32)
     total_q = sum(widths_list)
@@ -117,8 +177,9 @@ def evaluate_single_trial(args):
 
     F_true = compute_F_true(widths, offsets, D, N, oracle_seed)
 
-    # Get query order
-    query_order = fwd_merge_queries(widths_list, offsets_list, D, N, strategy_seed, oracle_seed)
+    # Get query order based on strategy
+    strat_fn = STRATEGIES[strategy_name]
+    query_order = strat_fn(widths_list, offsets_list, D, N, strategy_seed, oracle_seed)
 
     # Track MSE
     is_known = np.zeros(max_qid, dtype=np.bool_)
@@ -151,8 +212,8 @@ def evaluate_single_trial(args):
     return mse_list
 
 
-def evaluate_cone_fast(widths_list, N=8, num_samples=500, seed=42, n_workers=4):
-    """Evaluate fwd-merge on a cone using numba + multiprocessing."""
+def evaluate_cone_fast(widths_list, N=8, num_samples=500, seed=42, n_workers=4, strategy="fwd-merge"):
+    """Evaluate a strategy on a cone using numba + multiprocessing."""
     D = len(widths_list)
     offsets_list = [sum(widths_list[:i]) for i in range(D)]
     total_q = sum(widths_list)
@@ -162,7 +223,7 @@ def evaluate_cone_fast(widths_list, N=8, num_samples=500, seed=42, n_workers=4):
     for _ in range(num_samples):
         oracle_seed = int(rng.integers(0, 2**62))
         strategy_seed = int(rng.integers(0, 2**62))
-        args_list.append((widths_list, offsets_list, D, N, oracle_seed, strategy_seed))
+        args_list.append((widths_list, offsets_list, D, N, oracle_seed, strategy_seed, strategy))
 
     if n_workers > 1:
         with mp.Pool(n_workers) as pool:
@@ -204,16 +265,22 @@ if __name__ == "__main__":
     warmup()
     print("Done.\n")
 
-    print(f"{'Funnel':15s}  {'k':>3s}  {'ratio':>8s}  {'cumul':>8s}  {'trials':>6s}  {'time':>6s}")
-    print("-" * 55)
+    strat_names = list(STRATEGIES.keys())
+    header = f"{'Funnel':15s}  {'k':>3s}  " + "  ".join(f"{s:>14s}" for s in strat_names)
+    print(header)
+    print("-" * len(header))
 
-    for D in range(5, 51):
+    for D in range(5, 31):
         w = funnel(D)
         k = D
-        n = 1000 if sum(w) < 100 else 500 if sum(w) < 500 else 200 if sum(w) < 2000 else 50
-        t0 = time.monotonic()
-        cumul, k, trials = evaluate_cone_fast(w, N=8, num_samples=n, n_workers=4)
-        elapsed = time.monotonic() - t0
-        ratio = cumul / k
-        s = '✓' if ratio <= 1 + 1e-6 else '✗'
-        print(f"D={D:<3d} [{w[0]}..{w[-1]}]  {k:3d}  {ratio:8.5f}{s}  {cumul:8.3f}  {trials:6d}  {elapsed:5.1f}s", flush=True)
+        tq = sum(w)
+        n = 1000 if tq < 100 else 500 if tq < 500 else 200 if tq < 2000 else 50
+        results = []
+        for sname in strat_names:
+            t0 = time.monotonic()
+            cumul, _, trials = evaluate_cone_fast(w, N=8, num_samples=n, n_workers=4, strategy=sname)
+            elapsed = time.monotonic() - t0
+            ratio = cumul / k
+            s = '✓' if ratio <= 1 + 1e-6 else '✗'
+            results.append(f"{ratio:.4f}{s}({trials:3d})")
+        print(f"D={D:<3d} [{w[0]:>3d}..{w[-1]:>2d}]  {k:3d}  " + "  ".join(results), flush=True)
