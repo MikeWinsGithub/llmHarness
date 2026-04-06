@@ -46,6 +46,10 @@ def evaluate(widths, strategy_fn, N=8, num_samples=300, seed=42, timeout=120):
                 mse_accum[qi] += (est - F_true)**2
             if abs(est - F_true) < 1e-15:
                 break
+        # Fill remaining positions with the final MSE (strategy stopped but MSE persists)
+        final_mse = (est - F_true)**2
+        for j in range(qi + 1, total_q + 1):
+            mse_accum[j] += final_mse
         trials += 1
     mse = mse_accum / max(trials, 1)
     return float(np.sum(mse)), k, trials
