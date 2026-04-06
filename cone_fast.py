@@ -152,6 +152,51 @@ def sample_third_then_fwd_queries(widths, offsets, D, N, seed, oracle_seed):
     return order
 
 
+def sample_then_fwd_queries(widths, offsets, D, N, seed, oracle_seed, frac=0.33, n_probes=1):
+    """Trace n_probes random vertices from layer D*frac to terminal, then fwd-merge."""
+    rng = np.random.default_rng(seed)
+    known = {}
+    order = []
+    start_layer = max(0, min(D - 1, int(D * frac)))
+
+    for _ in range(n_probes):
+        v = int(rng.integers(0, widths[start_layer]))
+        for layer in range(start_layer, D - 1):
+            qid = offsets[layer] + v
+            nv = widths[layer + 1]
+            if qid not in known:
+                order.append((qid, layer, nv))
+            v = _oq_helper(known, oracle_seed, qid, nv)
+        qid = offsets[D - 1] + v
+        if qid not in known:
+            order.append((qid, D - 1, 2))
+            _oq_helper(known, oracle_seed, qid, 2)
+
+    _fwd_merge_from(widths, offsets, D, N, rng, oracle_seed, known, order)
+    return order
+
+
+# Wrapper functions for each (frac, n_probes) combo so they're picklable
+def _s25x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.25, 1)
+def _s25x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.25, 3)
+def _s25x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.25, 5)
+def _s33x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.33, 1)
+def _s33x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.33, 3)
+def _s33x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.33, 5)
+def _s50x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.50, 1)
+def _s50x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.50, 3)
+def _s50x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.50, 5)
+def _s67x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.67, 1)
+def _s67x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.67, 3)
+def _s67x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.67, 5)
+def _s75x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.75, 1)
+def _s75x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.75, 3)
+def _s75x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.75, 5)
+def _s90x1(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.90, 1)
+def _s90x3(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.90, 3)
+def _s90x5(w, o, D, N, s, os): return sample_then_fwd_queries(w, o, D, N, s, os, 0.90, 5)
+
+
 # ---------------------------------------------------------------------------
 # Strategy registry
 # ---------------------------------------------------------------------------
@@ -160,6 +205,12 @@ STRATEGIES = {
     "fwd-merge": fwd_merge_queries,
     "blind-1/4+fwd": blind_quarter_then_fwd_queries,
     "sample-1/3+fwd": sample_third_then_fwd_queries,
+    "s25%x1+fwd": _s25x1, "s25%x3+fwd": _s25x3, "s25%x5+fwd": _s25x5,
+    "s33%x1+fwd": _s33x1, "s33%x3+fwd": _s33x3, "s33%x5+fwd": _s33x5,
+    "s50%x1+fwd": _s50x1, "s50%x3+fwd": _s50x3, "s50%x5+fwd": _s50x5,
+    "s67%x1+fwd": _s67x1, "s67%x3+fwd": _s67x3, "s67%x5+fwd": _s67x5,
+    "s75%x1+fwd": _s75x1, "s75%x3+fwd": _s75x3, "s75%x5+fwd": _s75x5,
+    "s90%x1+fwd": _s90x1, "s90%x3+fwd": _s90x3, "s90%x5+fwd": _s90x5,
 }
 
 
