@@ -341,43 +341,60 @@ def make_plots(stats1, stats2, results, N, A, B, outdir):
 
 # -- Tetrahedral contraction --------------------------------------------------
 
-def tetra_contraction(T):
-    """Tetrahedral self-contraction of a 3-way tensor.
+def tetra_contraction_mixed(T):
+    """Mixed-mode tetrahedral contraction (3 same-mode + 3 cross-mode edges).
 
-    Places T at all 4 vertices of a tetrahedron and contracts along edges:
-      Z = Σ_{a,b,c,d,e,f} T[a,b,c] T[a,d,e] T[b,d,f] T[c,e,f]
+      Z = Σ T[a,b,c] T[a,d,e] T[b,d,f] T[c,e,f]
 
-    Edges (vertex pairs → shared index):
-      (1,2)→a  (1,3)→b  (1,4)→c  (2,3)→d  (2,4)→e  (3,4)→f
-
-    3 edges pair same-mode indices (a,d,f), 3 pair cross-mode (b,c,e),
-    making this a genuinely mode-mixing degree-4 invariant.
-
-    Computed in O(N^5) via two intermediate contractions.
+    NOT the natural same-mode contraction; included for comparison.
     """
-    # M1[b,c,d,e] = Σ_a T[a,b,c] T[a,d,e]          O(N^5)
     M1 = np.einsum("abc,ade->bcde", T, T, optimize=True)
-    # M2[b,d,c,e] = Σ_f T[b,d,f] T[c,e,f]          O(N^5)
     M2 = np.einsum("bdf,cef->bdce", T, T, optimize=True)
-    # Z = Σ_{b,c,d,e} M1[b,c,d,e] M2[b,d,c,e]      O(N^4)
     return float(np.einsum("bcde,bdce->", M1, M2))
 
 
+def tetra_contraction(T):
+    """Same-mode tetrahedral contraction: every edge connects the same mode.
+
+    Uses a proper 3-edge-coloring of K4:
+      mode 0: edges (1,2) and (3,4)  → indices a, f
+      mode 1: edges (1,3) and (2,4)  → indices b, e
+      mode 2: edges (1,4) and (2,3)  → indices c, d
+
+      Z = Σ T[a,b,c] T[a,e,d] T[f,b,d] T[f,e,c]
+
+    This is the (S,X,Y) pair-contraction invariant — equivalent to the
+    cross_mode statistic in compute_low_degree_stats().
+
+    Computed in O(N^5) via two intermediate contractions.
+    """
+    # M1[b,c,e,d] = Σ_a T[a,b,c] T[a,e,d]          O(N^5)
+    M1 = np.einsum("abc,aed->bced", T, T, optimize=True)
+    # M2[b,d,e,c] = Σ_f T[f,b,d] T[f,e,c]          O(N^5)
+    M2 = np.einsum("fbd,fec->bdec", T, T, optimize=True)
+    # Z = Σ_{b,c,e,d} M1[b,c,e,d] M2[b,d,e,c]      O(N^4)
+    return float(np.einsum("bced,bdec->", M1, M2))
+
+
 def run_tetra(N, A, B, num_samples, seed):
-    """Compute tetrahedral contraction for many samples of both types."""
+    """Compute both tetrahedral contractions for many samples."""
     R = A * B
     rng = np.random.default_rng(seed)
-    z1, z2, f1, f2 = [], [], [], []
+    same1, same2, mixed1, mixed2, f1, f2 = [], [], [], [], [], []
     for i in range(num_samples):
         T1 = generate_type1(N, R, rng)
         T2 = generate_type2(N, A, B, rng)
-        z1.append(tetra_contraction(T1))
-        z2.append(tetra_contraction(T2))
+        same1.append(tetra_contraction(T1))
+        same2.append(tetra_contraction(T2))
+        mixed1.append(tetra_contraction_mixed(T1))
+        mixed2.append(tetra_contraction_mixed(T2))
         f1.append(float(np.sum(T1 ** 2) ** 2))   # ||T||_F^4
         f2.append(float(np.sum(T2 ** 2) ** 2))
         if (i + 1) % max(1, num_samples // 5) == 0:
             print(f"    {i + 1}/{num_samples}")
-    return np.array(z1), np.array(z2), np.array(f1), np.array(f2)
+    return (np.array(same1), np.array(same2),
+            np.array(mixed1), np.array(mixed2),
+            np.array(f1), np.array(f2))
 
 
 def tetra_experiment(N, A, B, num_samples, seed, outdir):
@@ -390,102 +407,83 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
     print(f"{'#' * 60}")
 
     t0 = time.time()
-    z1, z2, f1, f2 = run_tetra(N, A, B, num_samples, seed)
+    same1, same2, mixed1, mixed2, f1, f2 = run_tetra(N, A, B, num_samples, seed)
     elapsed = time.time() - t0
     print(f"    {num_samples} pairs in {elapsed:.1f}s")
 
-    # Normalized version: Z / ||T||_F^4
-    zn1 = z1 / f1
-    zn2 = z2 / f2
+    # Report for both contraction types
+    for label, z1, z2 in [("SAME-MODE (correct)", same1, same2),
+                           ("MIXED-MODE (old)",    mixed1, mixed2)]:
+        zn1 = z1 / f1
+        zn2 = z2 / f2
 
-    # Tests on raw and normalized
-    ks_raw, p_raw = sp_stats.ks_2samp(z1, z2)
-    ks_norm, p_norm = sp_stats.ks_2samp(zn1, zn2)
-    t_raw, tp_raw = sp_stats.ttest_ind(z1, z2, equal_var=False)
-    t_norm, tp_norm = sp_stats.ttest_ind(zn1, zn2, equal_var=False)
+        ks_raw, p_raw = sp_stats.ks_2samp(z1, z2)
+        ks_norm, p_norm = sp_stats.ks_2samp(zn1, zn2)
 
-    # Chi-squared and KL divergence on normalized histograms
-    all_vals = np.concatenate([zn1, zn2])
-    n_bins = max(15, int(np.sqrt(num_samples)))
-    bin_edges = np.histogram_bin_edges(all_vals, bins=n_bins)
-    h1, _ = np.histogram(zn1, bins=bin_edges)
-    h2, _ = np.histogram(zn2, bins=bin_edges)
+        # Chi-squared and JSD on normalized histograms
+        all_vals = np.concatenate([zn1, zn2])
+        n_bins = max(15, int(np.sqrt(num_samples)))
+        bin_edges = np.histogram_bin_edges(all_vals, bins=n_bins)
+        h1, _ = np.histogram(zn1, bins=bin_edges)
+        h2, _ = np.histogram(zn2, bins=bin_edges)
+        h1f, h2f = h1.astype(float), h2.astype(float)
+        while len(h1f) > 3 and (h1f[0] + h2f[0] < 5):
+            h1f = np.concatenate([[h1f[0] + h1f[1]], h1f[2:]])
+            h2f = np.concatenate([[h2f[0] + h2f[1]], h2f[2:]])
+        while len(h1f) > 3 and (h1f[-1] + h2f[-1] < 5):
+            h1f = np.concatenate([h1f[:-2], [h1f[-2] + h1f[-1]]])
+            h2f = np.concatenate([h2f[:-2], [h2f[-2] + h2f[-1]]])
+        n1t, n2t = h1f.sum(), h2f.sum()
+        exp1 = (h1f + h2f) * n1t / (n1t + n2t)
+        exp2 = (h1f + h2f) * n2t / (n1t + n2t)
+        mask = (exp1 > 0) & (exp2 > 0)
+        chi2 = float(np.sum((h1f[mask] - exp1[mask]) ** 2 / exp1[mask])
+                     + np.sum((h2f[mask] - exp2[mask]) ** 2 / exp2[mask]))
+        chi2_dof = int(mask.sum() - 1)
+        chi2_p = float(1 - sp_stats.chi2.cdf(chi2, chi2_dof)) if chi2_dof > 0 else 1.0
+        eps = 1e-10
+        p1 = h1f / (h1f.sum() + eps) + eps
+        p2 = h2f / (h2f.sum() + eps) + eps
+        p1 /= p1.sum(); p2 /= p2.sum()
+        m = 0.5 * (p1 + p2)
+        jsd = float(0.5 * np.sum(p1 * np.log(p1 / m))
+                    + 0.5 * np.sum(p2 * np.log(p2 / m)))
 
-    # Chi-squared test for homogeneity
-    # Pool bins with < 5 expected counts from the edges
-    h1f, h2f = h1.astype(float), h2.astype(float)
-    # Merge low-count bins from the tails
-    while len(h1f) > 3 and (h1f[0] + h2f[0] < 5):
-        h1f = np.concatenate([[h1f[0] + h1f[1]], h1f[2:]])
-        h2f = np.concatenate([[h2f[0] + h2f[1]], h2f[2:]])
-    while len(h1f) > 3 and (h1f[-1] + h2f[-1] < 5):
-        h1f = np.concatenate([h1f[:-2], [h1f[-2] + h1f[-1]]])
-        h2f = np.concatenate([h2f[:-2], [h2f[-2] + h2f[-1]]])
-    n1_total, n2_total = h1f.sum(), h2f.sum()
-    expected1 = (h1f + h2f) * n1_total / (n1_total + n2_total)
-    expected2 = (h1f + h2f) * n2_total / (n1_total + n2_total)
-    mask = (expected1 > 0) & (expected2 > 0)
-    chi2 = float(np.sum((h1f[mask] - expected1[mask]) ** 2 / expected1[mask])
-                 + np.sum((h2f[mask] - expected2[mask]) ** 2 / expected2[mask]))
-    chi2_dof = int(mask.sum() - 1)
-    chi2_p = float(1 - sp_stats.chi2.cdf(chi2, chi2_dof)) if chi2_dof > 0 else 1.0
-
-    # KL divergence (symmetrized: Jensen-Shannon)
-    eps = 1e-10
-    p1 = h1f / (h1f.sum() + eps) + eps
-    p2 = h2f / (h2f.sum() + eps) + eps
-    p1 /= p1.sum()
-    p2 /= p2.sum()
-    m = 0.5 * (p1 + p2)
-    kl_1m = float(np.sum(p1 * np.log(p1 / m)))
-    kl_2m = float(np.sum(p2 * np.log(p2 / m)))
-    jsd = 0.5 * kl_1m + 0.5 * kl_2m   # Jensen-Shannon divergence
-
-    print(f"\n  {'':30} {'mean(T1)':>14} {'mean(T2)':>14} {'KS':>7} {'p(KS)':>10}")
-    print(f"  {'-' * 78}")
-    print(f"  {'Z (raw)':30} {np.mean(z1):>14.4e} {np.mean(z2):>14.4e} "
-          f"{ks_raw:>7.3f} {p_raw:>10.2e}")
-    print(f"  {'Z / ||T||_F^4 (normalized)':30} {np.mean(zn1):>14.6f} {np.mean(zn2):>14.6f} "
-          f"{ks_norm:>7.3f} {p_norm:>10.2e}")
-    print(f"  {'-' * 78}")
-    print(f"  {'std(T1)':30} {np.std(z1):>14.4e} {np.std(z2):>14.4e}")
-    print(f"  {'std normalized':30} {np.std(zn1):>14.6f} {np.std(zn2):>14.6f}")
-    print(f"  {'-' * 78}")
-    print(f"  Chi-squared test:   chi2 = {chi2:.2f},  dof = {chi2_dof},  p = {chi2_p:.4e}")
-    print(f"  Jensen-Shannon div: JSD  = {jsd:.6f}  (0 = identical, ln2 = maximally different)")
-    print(f"  KL(T1||M) = {kl_1m:.6f},  KL(T2||M) = {kl_2m:.6f}")
-
-    if min(p_norm, chi2_p) < 0.05:
-        best_p = min(p_norm, chi2_p)
-        print(f"\n  >>> DISTINGUISHABLE via tetrahedral contraction (best p = {best_p:.2e})")
-    else:
-        print(f"\n  >>> NOT distinguishable (KS p = {p_norm:.2e}, chi2 p = {chi2_p:.2e})")
+        print(f"\n  --- {label} ---")
+        print(f"  {'':30} {'mean(T1)':>14} {'mean(T2)':>14} {'KS':>7} {'p(KS)':>10}")
+        print(f"  {'-' * 78}")
+        print(f"  {'Z (raw)':30} {np.mean(z1):>14.4e} {np.mean(z2):>14.4e} "
+              f"{ks_raw:>7.3f} {p_raw:>10.2e}")
+        print(f"  {'Z / ||T||_F^4':30} {np.mean(zn1):>14.6f} {np.mean(zn2):>14.6f} "
+              f"{ks_norm:>7.3f} {p_norm:>10.2e}")
+        print(f"  {'-' * 78}")
+        print(f"  std(Z/||T||^4):  T1={np.std(zn1):.6f}  T2={np.std(zn2):.6f}")
+        print(f"  Chi2={chi2:.1f} (dof={chi2_dof}, p={chi2_p:.2e})   "
+              f"JSD={jsd:.6f}")
+        if p_norm < 0.05:
+            print(f"  >>> DISTINGUISHABLE (p = {p_norm:.2e})")
+        else:
+            print(f"  >>> NOT distinguishable (p = {p_norm:.2e})")
 
     # -- Plots --
     os.makedirs(outdir, exist_ok=True)
     tag = f"N={N}  A={A}  B={B}  R={R}"
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-
-    ax = axes[0]
-    ax.hist(z1, bins=25, alpha=0.55, label="Type 1 (generic)", color="#3498db")
-    ax.hist(z2, bins=25, alpha=0.55, label="Type 2 (structured)", color="#e74c3c")
-    ax.set_xlabel("Z (raw)")
-    ax.set_title(f"Tetrahedral contraction (raw)\nKS={ks_raw:.3f}  p={p_raw:.1e}")
-    ax.legend()
-
-    ax = axes[1]
-    ax.hist(zn1, bins=25, alpha=0.55, label="Type 1 (generic)", color="#3498db")
-    ax.hist(zn2, bins=25, alpha=0.55, label="Type 2 (structured)", color="#e74c3c")
-    ax.set_xlabel("Z / ||T||_F^4")
-    ax.set_title(f"Tetrahedral contraction (normalized)\nKS={ks_norm:.3f}  p={p_norm:.1e}")
-    ax.legend()
-
-    plt.suptitle(f"Tetrahedral Contraction Histograms  ({tag})")
+    for ax, (label, z1, z2) in zip(axes, [
+            ("Same-mode tetrahedron", same1 / f1, same2 / f2),
+            ("Mixed-mode tetrahedron", mixed1 / f1, mixed2 / f2)]):
+        ks, p = sp_stats.ks_2samp(z1, z2)
+        ax.hist(z1, bins=25, alpha=0.55, label="Type 1 (generic)", color="#3498db")
+        ax.hist(z2, bins=25, alpha=0.55, label="Type 2 (structured)", color="#e74c3c")
+        ax.set_xlabel("Z / ||T||_F^4")
+        ax.set_title(f"{label}\nKS={ks:.3f}  p={p:.1e}")
+        ax.legend(fontsize=8)
+    plt.suptitle(f"Tetrahedral Contractions  ({tag})")
     plt.tight_layout()
     fig.savefig(os.path.join(outdir, "tetra_histograms.png"), dpi=150)
     plt.close(fig)
-    print(f"    Plot saved to {outdir}/tetra_histograms.png")
+    print(f"\n    Plot saved to {outdir}/tetra_histograms.png")
 
 
 # -- CLI ----------------------------------------------------------------------
