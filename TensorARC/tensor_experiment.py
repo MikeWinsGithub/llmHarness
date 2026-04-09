@@ -386,31 +386,72 @@ def tetra_contraction_4ind(T1, T2, T3, T4):
     return float(np.einsum("bced,bdec->", M1, M2))
 
 
+def generate_edge_shared_tetra_type1(N, R, rng):
+    """Build 4 tensors for edge-shared tetrahedral contraction (Type 1).
+
+    6 independent sets of R random vectors (one per edge of tetrahedron).
+    Each tensor uses the 3 edges meeting at its vertex.
+    Edge coloring: (1,2)&(3,4)->mode0, (1,3)&(2,4)->mode1, (1,4)&(2,3)->mode2.
+    """
+    u12 = rng.standard_normal((R, N))    # mode 0, edge (1,2)
+    u34 = rng.standard_normal((R, N))    # mode 0, edge (3,4)
+    w13 = rng.standard_normal((R, N))    # mode 1, edge (1,3)
+    w24 = rng.standard_normal((R, N))    # mode 1, edge (2,4)
+    z14 = rng.standard_normal((R, N))    # mode 2, edge (1,4)
+    z23 = rng.standard_normal((R, N))    # mode 2, edge (2,3)
+    T1 = np.einsum("ri,rj,rk->ijk", u12, w13, z14, optimize=True)
+    T2 = np.einsum("ri,rj,rk->ijk", u12, w24, z23, optimize=True)
+    T3 = np.einsum("ri,rj,rk->ijk", u34, w13, z23, optimize=True)
+    T4 = np.einsum("ri,rj,rk->ijk", u34, w24, z14, optimize=True)
+    return T1, T2, T3, T4
+
+
+def generate_edge_shared_tetra_type2(N, A, B, rng):
+    """Build 4 tensors for edge-shared tetrahedral contraction (Type 2).
+
+    Same as Type 1 but mode-0 edges have only A distinct vectors (shared
+    structure), while mode-1 and mode-2 edges have A*B vectors.
+    """
+    v12 = rng.standard_normal((A, N))       # mode 0, edge (1,2) — A vectors
+    v34 = rng.standard_normal((A, N))       # mode 0, edge (3,4) — A vectors
+    w13 = rng.standard_normal((A, B, N))    # mode 1, edge (1,3)
+    w24 = rng.standard_normal((A, B, N))    # mode 1, edge (2,4)
+    z14 = rng.standard_normal((A, B, N))    # mode 2, edge (1,4)
+    z23 = rng.standard_normal((A, B, N))    # mode 2, edge (2,3)
+    T1 = np.einsum("ai,abj,abk->ijk", v12, w13, z14, optimize=True)
+    T2 = np.einsum("ai,abj,abk->ijk", v12, w24, z23, optimize=True)
+    T3 = np.einsum("ai,abj,abk->ijk", v34, w13, z23, optimize=True)
+    T4 = np.einsum("ai,abj,abk->ijk", v34, w24, z14, optimize=True)
+    return T1, T2, T3, T4
+
+
 def run_tetra(N, A, B, num_samples, seed):
-    """Compute tetrahedral contractions: self (4 copies) and 4-independent."""
+    """Compute tetrahedral contractions: self, edge-shared, and 4-independent."""
     R = A * B
     rng = np.random.default_rng(seed)
-    self1, self2, ind1, ind2 = [], [], [], []
+    self1, self2, edge1, edge2, ind1, ind2 = [], [], [], [], [], []
     for i in range(num_samples):
         # Self-contraction: 4 copies of same tensor
         T1a = generate_type1(N, R, rng)
         T2a = generate_type2(N, A, B, rng)
         self1.append(tetra_contraction(T1a))
         self2.append(tetra_contraction(T2a))
-        # Independent: 4 fresh draws of same type
-        Ta = generate_type1(N, R, rng)
-        Tb = generate_type1(N, R, rng)
-        Tc = generate_type1(N, R, rng)
-        Td = generate_type1(N, R, rng)
-        ind1.append(tetra_contraction_4ind(Ta, Tb, Tc, Td))
-        Ta = generate_type2(N, A, B, rng)
-        Tb = generate_type2(N, A, B, rng)
-        Tc = generate_type2(N, A, B, rng)
-        Td = generate_type2(N, A, B, rng)
-        ind2.append(tetra_contraction_4ind(Ta, Tb, Tc, Td))
+        # Edge-shared: vectors shared along edges
+        Ts = generate_edge_shared_tetra_type1(N, R, rng)
+        edge1.append(tetra_contraction_4ind(*Ts))
+        Ts = generate_edge_shared_tetra_type2(N, A, B, rng)
+        edge2.append(tetra_contraction_4ind(*Ts))
+        # Fully independent: 4 fresh draws
+        ind1.append(tetra_contraction_4ind(
+            generate_type1(N, R, rng), generate_type1(N, R, rng),
+            generate_type1(N, R, rng), generate_type1(N, R, rng)))
+        ind2.append(tetra_contraction_4ind(
+            generate_type2(N, A, B, rng), generate_type2(N, A, B, rng),
+            generate_type2(N, A, B, rng), generate_type2(N, A, B, rng)))
         if (i + 1) % max(1, num_samples // 5) == 0:
             print(f"    {i + 1}/{num_samples}")
     return (np.array(self1), np.array(self2),
+            np.array(edge1), np.array(edge2),
             np.array(ind1), np.array(ind2))
 
 
@@ -424,13 +465,14 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
     print(f"{'#' * 60}")
 
     t0 = time.time()
-    self1, self2, ind1, ind2 = run_tetra(N, A, B, num_samples, seed)
+    self1, self2, edge1, edge2, ind1, ind2 = run_tetra(N, A, B, num_samples, seed)
     elapsed = time.time() - t0
     print(f"    {num_samples} pairs in {elapsed:.1f}s")
 
-    # Report for both modes
-    for label, z1, z2 in [("4 COPIES OF SAME TENSOR", self1, self2),
-                           ("4 INDEPENDENT DRAWS",     ind1,  ind2)]:
+    # Report for all three modes
+    for label, z1, z2 in [("4 COPIES OF SAME TENSOR",  self1, self2),
+                           ("EDGE-SHARED VECTORS",      edge1, edge2),
+                           ("4 INDEPENDENT DRAWS",      ind1,  ind2)]:
         ks, p_ks = sp_stats.ks_2samp(z1, z2)
 
         # Chi-squared and JSD
@@ -479,9 +521,10 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
     os.makedirs(outdir, exist_ok=True)
     tag = f"N={N}  A={A}  B={B}  R={R}"
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     for ax, (label, z1, z2) in zip(axes, [
             ("4 copies of same tensor", self1, self2),
+            ("Edge-shared vectors",     edge1, edge2),
             ("4 independent draws",     ind1,  ind2)]):
         ks, p = sp_stats.ks_2samp(z1, z2)
         ax.hist(z1, bins=25, alpha=0.55, label="Type 1 (generic)", color="#3498db")
