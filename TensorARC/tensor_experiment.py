@@ -539,6 +539,106 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
     print(f"\n    Plot saved to {outdir}/tetra_histograms.png")
 
 
+# -- KL / JSD sweep -----------------------------------------------------------
+
+def compute_jsd(z1, z2):
+    """Jensen-Shannon divergence from two sample arrays."""
+    all_vals = np.concatenate([z1, z2])
+    n_bins = max(15, int(np.sqrt(len(z1))))
+    bin_edges = np.histogram_bin_edges(all_vals, bins=n_bins)
+    h1, _ = np.histogram(z1, bins=bin_edges)
+    h2, _ = np.histogram(z2, bins=bin_edges)
+    h1f, h2f = h1.astype(float), h2.astype(float)
+    while len(h1f) > 3 and (h1f[0] + h2f[0] < 5):
+        h1f = np.concatenate([[h1f[0] + h1f[1]], h1f[2:]])
+        h2f = np.concatenate([[h2f[0] + h2f[1]], h2f[2:]])
+    while len(h1f) > 3 and (h1f[-1] + h2f[-1] < 5):
+        h1f = np.concatenate([h1f[:-2], [h1f[-2] + h1f[-1]]])
+        h2f = np.concatenate([h2f[:-2], [h2f[-2] + h2f[-1]]])
+    eps = 1e-10
+    p1 = h1f / (h1f.sum() + eps) + eps
+    p2 = h2f / (h2f.sum() + eps) + eps
+    p1 /= p1.sum(); p2 /= p2.sum()
+    m = 0.5 * (p1 + p2)
+    return float(0.5 * np.sum(p1 * np.log(p1 / m))
+                 + 0.5 * np.sum(p2 * np.log(p2 / m)))
+
+
+def kl_sweep(N, R, num_samples, seed, outdir):
+    """Sweep B from 1 to R (A = R/B), compute JSD for each wiring mode."""
+    # Find all B values where B divides R and A = R/B >= 1
+    B_values = sorted(b for b in range(1, R + 1) if R % b == 0)
+    print(f"KL sweep: N={N}, R={R}, {len(B_values)} B-values from {B_values[0]} to {B_values[-1]}")
+    print(f"  A/N = 1 transition at B = {R // N} (A = {N})\n")
+
+    results = []
+    for B in B_values:
+        A = R // B
+        rng = np.random.default_rng(seed)
+        self1, self2, edge1, edge2 = [], [], [], []
+        for _ in range(num_samples):
+            T1a = generate_type1(N, R, rng)
+            T2a = generate_type2(N, A, B, rng)
+            self1.append(tetra_contraction(T1a))
+            self2.append(tetra_contraction(T2a))
+            Ts = generate_edge_shared_tetra_type1(N, R, rng)
+            edge1.append(tetra_contraction_4ind(*Ts))
+            Ts = generate_edge_shared_tetra_type2(N, A, B, rng)
+            edge2.append(tetra_contraction_4ind(*Ts))
+
+        self1, self2 = np.array(self1), np.array(self2)
+        edge1, edge2 = np.array(edge1), np.array(edge2)
+        jsd_self = compute_jsd(self1, self2)
+        jsd_edge = compute_jsd(edge1, edge2)
+        ks_self = float(sp_stats.ks_2samp(self1, self2)[0])
+        ks_edge = float(sp_stats.ks_2samp(edge1, edge2)[0])
+
+        results.append(dict(B=B, A=A, A_over_N=A / N,
+                            jsd_self=jsd_self, jsd_edge=jsd_edge,
+                            ks_self=ks_self, ks_edge=ks_edge))
+        print(f"  B={B:>4}  A={A:>4}  A/N={A/N:>6.2f}  "
+              f"JSD_self={jsd_self:.4f}  JSD_edge={jsd_edge:.4f}")
+
+    # -- Plot --
+    os.makedirs(outdir, exist_ok=True)
+    Bs = [r["B"] for r in results]
+    A_over_N = [r["A_over_N"] for r in results]
+    jsd_self = [r["jsd_self"] for r in results]
+    jsd_edge = [r["jsd_edge"] for r in results]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left: JSD vs A/N
+    ax = axes[0]
+    ax.plot(A_over_N, jsd_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
+    ax.plot(A_over_N, jsd_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
+    ax.axhline(y=np.log(2), color="gray", linestyle=":", alpha=0.5, label="ln2 (max)")
+    ax.axvline(x=1.0, color="black", linestyle="--", alpha=0.4, label="A/N = 1")
+    ax.set_xlabel("A / N")
+    ax.set_ylabel("Jensen-Shannon Divergence")
+    ax.set_title(f"JSD vs A/N  (N={N}, R={R})")
+    ax.legend(fontsize=8)
+    ax.set_xscale("log")
+
+    # Right: JSD vs B
+    ax = axes[1]
+    ax.plot(Bs, jsd_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
+    ax.plot(Bs, jsd_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
+    ax.axhline(y=np.log(2), color="gray", linestyle=":", alpha=0.5, label="ln2 (max)")
+    ax.axvline(x=R / N, color="black", linestyle="--", alpha=0.4, label=f"B={R//N} (A=N)")
+    ax.set_xlabel("B")
+    ax.set_ylabel("Jensen-Shannon Divergence")
+    ax.set_title(f"JSD vs B  (N={N}, R={R})")
+    ax.legend(fontsize=8)
+    ax.set_xscale("log")
+
+    plt.tight_layout()
+    path = os.path.join(outdir, "jsd_sweep.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"\n  Plot saved to {path}")
+
+
 # -- CLI ----------------------------------------------------------------------
 
 def main():
@@ -562,7 +662,16 @@ def main():
                     help="Use only degree<=4 invariants (tr G, tr G^2, cross-mode, entry 4th moment)")
     ap.add_argument("--tetra", action="store_true",
                     help="Run tetrahedral self-contraction experiment")
+    ap.add_argument("--kl-sweep", action="store_true",
+                    help="Sweep B from 1 to R, plot JSD vs A/N for tetra contractions")
     args = ap.parse_args()
+
+    # -- KL sweep mode --
+    if args.kl_sweep:
+        R = args.A * args.B
+        outdir = args.outdir or os.path.join("TensorARC", f"plots_N{args.N}_R{R}_klsweep")
+        kl_sweep(args.N, R, args.samples, args.seed, outdir)
+        return
 
     # -- Tetrahedral contraction mode --
     if args.tetra:
