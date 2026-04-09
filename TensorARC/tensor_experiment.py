@@ -79,7 +79,7 @@ def effective_rank(svs):
 
 
 def compute_stats(T):
-    """Compute a dict of scalar statistics for one tensor sample."""
+    """Full statistics (uses SVD). For the restricted experiment, see compute_low_degree_stats."""
     N = T.shape[0]
     s = {}
 
@@ -127,16 +127,82 @@ def compute_stats(T):
     return s
 
 
+def compute_low_degree_stats(T):
+    """Degree <= 4 polynomial invariants only (spectral power <= 4).
+
+    Allowed operations on any mode-m Gram matrix G_m = M_m @ M_m^T:
+      tr(G_m)   = sum sigma_i^2  = ||T||_F^2      (power 2)
+      tr(G_m^2) = sum sigma_i^4                     (power 4)
+
+    Plus cross-mode degree-4 contractions, entry 4th moment,
+    and slice-level decompositions.
+    """
+    N = T.shape[0]
+    s = {}
+
+    # -- Degree 2: Frobenius norm squared  (= tr(G_m) for any m) --
+    frob_sq = float(np.sum(T ** 2))
+    s["frob_sq"] = frob_sq
+    inv_frob4 = 1.0 / (frob_sq ** 2 + 1e-30)
+
+    # -- Degree 4: tr(G_m^2) = ||G_m||_F^2 = sum sigma_i^4  per mode --
+    for m in range(3):
+        M = mode_unfold(T, m)       # N x N^2
+        G = M @ M.T                 # N x N
+        tr_G2 = float(np.sum(G ** 2))
+        s[f"tr_G{m}_sq"] = tr_G2
+        s[f"tr_G{m}_sq_norm"] = tr_G2 * inv_frob4   # 1/eff_rank in power-2 sense
+
+    # -- Degree 4: entry 4th moment  sum T_{ijk}^4 --
+    entry_4th = float(np.sum(T ** 4))
+    s["entry_4th"] = entry_4th
+    s["entry_4th_norm"] = entry_4th * inv_frob4
+
+    # -- Degree 4: cross-mode invariant  (all-different pairing) --
+    #    I = sum_{a,a'} || T[a,:,:] @ T[a',:,:]^T ||_F^2
+    #    Computed via  C[a,d,b,f] = sum_c T[a,b,c]*T[d,f,c]
+    #    then  I = sum C[a,d,b,f]*C[a,d,f,b]
+    C = np.einsum("abc,dfc->adbf", T, T, optimize=True)
+    cross = float(np.sum(C * C.transpose(0, 1, 3, 2)))
+    s["cross_mode"] = cross
+    s["cross_mode_norm"] = cross * inv_frob4
+
+    # -- Degree 4: slice Frobenius concentration  sum_n ||T[n,:,:]||_F^4  per mode --
+    #    (= diagonal part of tr(G_m^2))
+    for m in range(3):
+        M = mode_unfold(T, m)
+        slice_norms_sq = np.sum(M ** 2, axis=1)        # ||row_n||^2 for each n
+        frob4_sum = float(np.sum(slice_norms_sq ** 2))
+        s[f"slice{m}_frob4"] = frob4_sum
+        s[f"slice{m}_frob4_norm"] = frob4_sum * inv_frob4
+
+    # -- Degree 4: sum_n tr((S_n^T S_n)^2)  per mode  (slice spectral power-4) --
+    #    = sum of sigma_i^4 within each slice, summed over slices
+    for m in range(3):
+        slices_m = np.moveaxis(T, m, 0)     # (N, N, N)
+        sv4_total = 0.0
+        for n in range(N):
+            Sn = slices_m[n]                 # N x N
+            Gn = Sn.T @ Sn                   # N x N
+            sv4_total += np.sum(Gn ** 2)     # tr(Gn^2)
+        s[f"slice{m}_sv4"] = float(sv4_total)
+        s[f"slice{m}_sv4_norm"] = float(sv4_total) * inv_frob4
+
+    return s
+
+
 # -- Experiment runner --------------------------------------------------------
 
-def run(N, A, B, num_samples, seed):
+def run(N, A, B, num_samples, seed, stats_fn=None):
     """Generate samples of both types and collect statistics."""
+    if stats_fn is None:
+        stats_fn = compute_stats
     R = A * B
     rng = np.random.default_rng(seed)
     stats1, stats2 = [], []
     for i in range(num_samples):
-        stats1.append(compute_stats(generate_type1(N, R, rng)))
-        stats2.append(compute_stats(generate_type2(N, A, B, rng)))
+        stats1.append(stats_fn(generate_type1(N, R, rng)))
+        stats2.append(stats_fn(generate_type2(N, A, B, rng)))
         if (i + 1) % max(1, num_samples // 5) == 0:
             print(f"    {i + 1}/{num_samples}")
     return stats1, stats2
@@ -292,6 +358,8 @@ def main():
                     help="Output directory for plots (auto-generated if omitted)")
     ap.add_argument("--sweep", action="store_true",
                     help="Sweep B in {1,2,3,4,6} at fixed R ~ N^2/3")
+    ap.add_argument("--low-degree", action="store_true",
+                    help="Use only degree<=4 invariants (tr G, tr G^2, cross-mode, entry 4th moment)")
     args = ap.parse_args()
 
     if args.sweep:
@@ -307,6 +375,10 @@ def main():
     else:
         cfgs = [(args.N, args.A, args.B)]
 
+    stats_fn = compute_low_degree_stats if args.low_degree else compute_stats
+    if args.low_degree:
+        print("*** LOW-DEGREE MODE: only degree<=4 polynomial invariants ***\n")
+
     sweep_summary = []
 
     for N, A, B in cfgs:
@@ -317,7 +389,7 @@ def main():
         print(f"{'#' * 60}")
 
         t0 = time.time()
-        s1, s2 = run(N, A, B, args.samples, args.seed)
+        s1, s2 = run(N, A, B, args.samples, args.seed, stats_fn=stats_fn)
         elapsed = time.time() - t0
         print(f"    Generated {args.samples} pairs in {elapsed:.1f}s")
 
