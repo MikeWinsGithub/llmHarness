@@ -376,25 +376,42 @@ def tetra_contraction(T):
     return float(np.einsum("bced,bdec->", M1, M2))
 
 
+def tetra_contraction_4ind(T1, T2, T3, T4):
+    """Same-mode tetrahedral contraction of 4 independent tensors.
+
+      Z = Σ T1[a,b,c] T2[a,e,d] T3[f,b,d] T4[f,e,c]
+    """
+    M1 = np.einsum("abc,aed->bced", T1, T2, optimize=True)
+    M2 = np.einsum("fbd,fec->bdec", T3, T4, optimize=True)
+    return float(np.einsum("bced,bdec->", M1, M2))
+
+
 def run_tetra(N, A, B, num_samples, seed):
-    """Compute both tetrahedral contractions for many samples."""
+    """Compute tetrahedral contractions: self (4 copies) and 4-independent."""
     R = A * B
     rng = np.random.default_rng(seed)
-    same1, same2, mixed1, mixed2, f1, f2 = [], [], [], [], [], []
+    self1, self2, ind1, ind2 = [], [], [], []
     for i in range(num_samples):
-        T1 = generate_type1(N, R, rng)
-        T2 = generate_type2(N, A, B, rng)
-        same1.append(tetra_contraction(T1))
-        same2.append(tetra_contraction(T2))
-        mixed1.append(tetra_contraction_mixed(T1))
-        mixed2.append(tetra_contraction_mixed(T2))
-        f1.append(float(np.sum(T1 ** 2) ** 2))   # ||T||_F^4
-        f2.append(float(np.sum(T2 ** 2) ** 2))
+        # Self-contraction: 4 copies of same tensor
+        T1a = generate_type1(N, R, rng)
+        T2a = generate_type2(N, A, B, rng)
+        self1.append(tetra_contraction(T1a))
+        self2.append(tetra_contraction(T2a))
+        # Independent: 4 fresh draws of same type
+        Ta = generate_type1(N, R, rng)
+        Tb = generate_type1(N, R, rng)
+        Tc = generate_type1(N, R, rng)
+        Td = generate_type1(N, R, rng)
+        ind1.append(tetra_contraction_4ind(Ta, Tb, Tc, Td))
+        Ta = generate_type2(N, A, B, rng)
+        Tb = generate_type2(N, A, B, rng)
+        Tc = generate_type2(N, A, B, rng)
+        Td = generate_type2(N, A, B, rng)
+        ind2.append(tetra_contraction_4ind(Ta, Tb, Tc, Td))
         if (i + 1) % max(1, num_samples // 5) == 0:
             print(f"    {i + 1}/{num_samples}")
-    return (np.array(same1), np.array(same2),
-            np.array(mixed1), np.array(mixed2),
-            np.array(f1), np.array(f2))
+    return (np.array(self1), np.array(self2),
+            np.array(ind1), np.array(ind2))
 
 
 def tetra_experiment(N, A, B, num_samples, seed, outdir):
@@ -407,25 +424,21 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
     print(f"{'#' * 60}")
 
     t0 = time.time()
-    same1, same2, mixed1, mixed2, f1, f2 = run_tetra(N, A, B, num_samples, seed)
+    self1, self2, ind1, ind2 = run_tetra(N, A, B, num_samples, seed)
     elapsed = time.time() - t0
     print(f"    {num_samples} pairs in {elapsed:.1f}s")
 
-    # Report for both contraction types
-    for label, z1, z2 in [("SAME-MODE (correct)", same1, same2),
-                           ("MIXED-MODE (old)",    mixed1, mixed2)]:
-        zn1 = z1 / f1
-        zn2 = z2 / f2
+    # Report for both modes
+    for label, z1, z2 in [("4 COPIES OF SAME TENSOR", self1, self2),
+                           ("4 INDEPENDENT DRAWS",     ind1,  ind2)]:
+        ks, p_ks = sp_stats.ks_2samp(z1, z2)
 
-        ks_raw, p_raw = sp_stats.ks_2samp(z1, z2)
-        ks_norm, p_norm = sp_stats.ks_2samp(zn1, zn2)
-
-        # Chi-squared and JSD on normalized histograms
-        all_vals = np.concatenate([zn1, zn2])
+        # Chi-squared and JSD
+        all_vals = np.concatenate([z1, z2])
         n_bins = max(15, int(np.sqrt(num_samples)))
         bin_edges = np.histogram_bin_edges(all_vals, bins=n_bins)
-        h1, _ = np.histogram(zn1, bins=bin_edges)
-        h2, _ = np.histogram(zn2, bins=bin_edges)
+        h1, _ = np.histogram(z1, bins=bin_edges)
+        h2, _ = np.histogram(z2, bins=bin_edges)
         h1f, h2f = h1.astype(float), h2.astype(float)
         while len(h1f) > 3 and (h1f[0] + h2f[0] < 5):
             h1f = np.concatenate([[h1f[0] + h1f[1]], h1f[2:]])
@@ -450,20 +463,17 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
                     + 0.5 * np.sum(p2 * np.log(p2 / m)))
 
         print(f"\n  --- {label} ---")
-        print(f"  {'':30} {'mean(T1)':>14} {'mean(T2)':>14} {'KS':>7} {'p(KS)':>10}")
-        print(f"  {'-' * 78}")
-        print(f"  {'Z (raw)':30} {np.mean(z1):>14.4e} {np.mean(z2):>14.4e} "
-              f"{ks_raw:>7.3f} {p_raw:>10.2e}")
-        print(f"  {'Z / ||T||_F^4':30} {np.mean(zn1):>14.6f} {np.mean(zn2):>14.6f} "
-              f"{ks_norm:>7.3f} {p_norm:>10.2e}")
-        print(f"  {'-' * 78}")
-        print(f"  std(Z/||T||^4):  T1={np.std(zn1):.6f}  T2={np.std(zn2):.6f}")
+        print(f"  {'':25} {'mean(T1)':>14} {'mean(T2)':>14} {'KS':>7} {'p(KS)':>10}")
+        print(f"  {'-' * 73}")
+        print(f"  {'Z':25} {np.mean(z1):>14.4e} {np.mean(z2):>14.4e} "
+              f"{ks:>7.3f} {p_ks:>10.2e}")
+        print(f"  {'std':25} {np.std(z1):>14.4e} {np.std(z2):>14.4e}")
         print(f"  Chi2={chi2:.1f} (dof={chi2_dof}, p={chi2_p:.2e})   "
               f"JSD={jsd:.6f}")
-        if p_norm < 0.05:
-            print(f"  >>> DISTINGUISHABLE (p = {p_norm:.2e})")
+        if p_ks < 0.05:
+            print(f"  >>> DISTINGUISHABLE (p = {p_ks:.2e})")
         else:
-            print(f"  >>> NOT distinguishable (p = {p_norm:.2e})")
+            print(f"  >>> NOT distinguishable (p = {p_ks:.2e})")
 
     # -- Plots --
     os.makedirs(outdir, exist_ok=True)
@@ -471,15 +481,15 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     for ax, (label, z1, z2) in zip(axes, [
-            ("Same-mode tetrahedron", same1 / f1, same2 / f2),
-            ("Mixed-mode tetrahedron", mixed1 / f1, mixed2 / f2)]):
+            ("4 copies of same tensor", self1, self2),
+            ("4 independent draws",     ind1,  ind2)]):
         ks, p = sp_stats.ks_2samp(z1, z2)
         ax.hist(z1, bins=25, alpha=0.55, label="Type 1 (generic)", color="#3498db")
         ax.hist(z2, bins=25, alpha=0.55, label="Type 2 (structured)", color="#e74c3c")
-        ax.set_xlabel("Z / ||T||_F^4")
+        ax.set_xlabel("Z")
         ax.set_title(f"{label}\nKS={ks:.3f}  p={p:.1e}")
         ax.legend(fontsize=8)
-    plt.suptitle(f"Tetrahedral Contractions  ({tag})")
+    plt.suptitle(f"Same-Mode Tetrahedral Contraction  ({tag})")
     plt.tight_layout()
     fig.savefig(os.path.join(outdir, "tetra_histograms.png"), dpi=150)
     plt.close(fig)
