@@ -541,27 +541,32 @@ def tetra_experiment(N, A, B, num_samples, seed, outdir):
 
 # -- KL / JSD sweep -----------------------------------------------------------
 
-def compute_jsd(z1, z2):
-    """Jensen-Shannon divergence from two sample arrays."""
+def compute_chi2_logp(z1, z2):
+    """Return -log10(p) from chi-squared homogeneity test on two samples."""
     all_vals = np.concatenate([z1, z2])
     n_bins = max(15, int(np.sqrt(len(z1))))
     bin_edges = np.histogram_bin_edges(all_vals, bins=n_bins)
     h1, _ = np.histogram(z1, bins=bin_edges)
     h2, _ = np.histogram(z2, bins=bin_edges)
     h1f, h2f = h1.astype(float), h2.astype(float)
+    # Merge low-count tail bins
     while len(h1f) > 3 and (h1f[0] + h2f[0] < 5):
         h1f = np.concatenate([[h1f[0] + h1f[1]], h1f[2:]])
         h2f = np.concatenate([[h2f[0] + h2f[1]], h2f[2:]])
     while len(h1f) > 3 and (h1f[-1] + h2f[-1] < 5):
         h1f = np.concatenate([h1f[:-2], [h1f[-2] + h1f[-1]]])
         h2f = np.concatenate([h2f[:-2], [h2f[-2] + h2f[-1]]])
-    eps = 1e-10
-    p1 = h1f / (h1f.sum() + eps) + eps
-    p2 = h2f / (h2f.sum() + eps) + eps
-    p1 /= p1.sum(); p2 /= p2.sum()
-    m = 0.5 * (p1 + p2)
-    return float(0.5 * np.sum(p1 * np.log(p1 / m))
-                 + 0.5 * np.sum(p2 * np.log(p2 / m)))
+    n1t, n2t = h1f.sum(), h2f.sum()
+    exp1 = (h1f + h2f) * n1t / (n1t + n2t)
+    exp2 = (h1f + h2f) * n2t / (n1t + n2t)
+    mask = (exp1 > 0) & (exp2 > 0)
+    chi2 = float(np.sum((h1f[mask] - exp1[mask]) ** 2 / exp1[mask])
+                 + np.sum((h2f[mask] - exp2[mask]) ** 2 / exp2[mask]))
+    dof = int(mask.sum() - 1)
+    if dof <= 0:
+        return 0.0
+    log_p = float(sp_stats.chi2.logsf(chi2, dof)) / np.log(10)  # log10(p)
+    return -log_p  # return -log10(p), so bigger = more distinguishable
 
 
 def kl_sweep(N, R, num_samples, seed, outdir):
@@ -588,52 +593,49 @@ def kl_sweep(N, R, num_samples, seed, outdir):
 
         self1, self2 = np.array(self1), np.array(self2)
         edge1, edge2 = np.array(edge1), np.array(edge2)
-        jsd_self = compute_jsd(self1, self2)
-        jsd_edge = compute_jsd(edge1, edge2)
-        ks_self = float(sp_stats.ks_2samp(self1, self2)[0])
-        ks_edge = float(sp_stats.ks_2samp(edge1, edge2)[0])
+        chi2_self = compute_chi2_logp(self1, self2)
+        chi2_edge = compute_chi2_logp(edge1, edge2)
 
         results.append(dict(B=B, A=A, A_over_N=A / N,
-                            jsd_self=jsd_self, jsd_edge=jsd_edge,
-                            ks_self=ks_self, ks_edge=ks_edge))
+                            chi2_self=chi2_self, chi2_edge=chi2_edge))
         print(f"  B={B:>4}  A={A:>4}  A/N={A/N:>6.2f}  "
-              f"JSD_self={jsd_self:.4f}  JSD_edge={jsd_edge:.4f}")
+              f"-log10(p)  self={chi2_self:>7.1f}   edge={chi2_edge:>7.1f}")
 
     # -- Plot --
     os.makedirs(outdir, exist_ok=True)
     Bs = [r["B"] for r in results]
     A_over_N = [r["A_over_N"] for r in results]
-    jsd_self = [r["jsd_self"] for r in results]
-    jsd_edge = [r["jsd_edge"] for r in results]
+    chi2_self = [r["chi2_self"] for r in results]
+    chi2_edge = [r["chi2_edge"] for r in results]
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Left: JSD vs A/N
+    # Left: -log10(p) vs A/N
     ax = axes[0]
-    ax.plot(A_over_N, jsd_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
-    ax.plot(A_over_N, jsd_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
-    ax.axhline(y=np.log(2), color="gray", linestyle=":", alpha=0.5, label="ln2 (max)")
+    ax.plot(A_over_N, chi2_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
+    ax.plot(A_over_N, chi2_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
+    ax.axhline(y=-np.log10(0.05), color="gray", linestyle=":", alpha=0.5, label="p = 0.05")
     ax.axvline(x=1.0, color="black", linestyle="--", alpha=0.4, label="A/N = 1")
     ax.set_xlabel("A / N")
-    ax.set_ylabel("Jensen-Shannon Divergence")
-    ax.set_title(f"JSD vs A/N  (N={N}, R={R})")
+    ax.set_ylabel("$-\\log_{10}(p_{\\chi^2})$")
+    ax.set_title(f"Chi-squared distinguishability vs A/N  (N={N}, R={R})")
     ax.legend(fontsize=8)
     ax.set_xscale("log")
 
-    # Right: JSD vs B
+    # Right: -log10(p) vs B
     ax = axes[1]
-    ax.plot(Bs, jsd_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
-    ax.plot(Bs, jsd_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
-    ax.axhline(y=np.log(2), color="gray", linestyle=":", alpha=0.5, label="ln2 (max)")
+    ax.plot(Bs, chi2_self, "o-", color="#e74c3c", label="Self (4 copies)", markersize=5)
+    ax.plot(Bs, chi2_edge, "s-", color="#3498db", label="Edge-shared", markersize=5)
+    ax.axhline(y=-np.log10(0.05), color="gray", linestyle=":", alpha=0.5, label="p = 0.05")
     ax.axvline(x=R / N, color="black", linestyle="--", alpha=0.4, label=f"B={R//N} (A=N)")
     ax.set_xlabel("B")
-    ax.set_ylabel("Jensen-Shannon Divergence")
-    ax.set_title(f"JSD vs B  (N={N}, R={R})")
+    ax.set_ylabel("$-\\log_{10}(p_{\\chi^2})$")
+    ax.set_title(f"Chi-squared distinguishability vs B  (N={N}, R={R})")
     ax.legend(fontsize=8)
     ax.set_xscale("log")
 
     plt.tight_layout()
-    path = os.path.join(outdir, "jsd_sweep.png")
+    path = os.path.join(outdir, "chi2_sweep.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"\n  Plot saved to {path}")
