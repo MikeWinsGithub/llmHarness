@@ -213,6 +213,78 @@ Tested: "deviate from fwd-merge only if greedy score ≥ (1 + threshold) × fwd 
 
 **Conclusion: The conjecture violation is fundamentally geometric, not strategic.** fwd-merge is optimal or within 0.02% of optimal. No heuristic meaningfully reduces the ratio.
 
+### Scoring function sweep (137 experiments, 2026-04-08)
+
+Tested `score = reach^a × var^b` with various (a, b) and threshold values:
+
+- **a < 0** (contrarian): catastrophic, +130σ worse
+- **a = 0** (variance-only): +67σ worse — reach is essential
+- **b = 0** (reach-only) with threshold > 0: never deviates, ≈ fwd-merge
+- **Sweet spot: a ≈ 1.2-1.3, b = 1.0, threshold = 0.5** → -0.00027, -10σ
+- Weighting reach slightly *more* than linearly is best
+- The improvement ceiling is the same ~0.0002 as the heuristic sweep
+
+### Exact 1-step variance reduction (2026-04-09)
+
+Replaced the heuristic `reach × var` with the **exact** 1-step variance reduction, computed analytically via prop_factor precomputation:
+- prop_factor[l][u] = ∂est / ∂layer_vals[l][u], computed via O(total_q) forward pass
+- Variance reduction = prop_factor² × var(layer_vals[l+1])
+- O(1) per candidate after precomputation, ~6x faster than 2-step lookahead
+
+**Result**: Same ~0.0001-0.00014 improvement as heuristic sweep at thresholds 0.2-0.5, with -4 to -5σ significance. Confirms that the heuristic was already a good proxy for the true scoring function. Pure greedy at 50k trials is statistically indistinguishable from fwd-merge (Δ = -0.00014 ± 0.00226, -0.1σ).
+
+### 2-step lookahead (2026-04-09)
+
+Tested 2-step lookahead with both **realized MSE** (using F_true) and **expected variance reduction** as objectives:
+
+- **Realized MSE version**: catastrophically worse (+0.34, +20σ). Two failure modes:
+  1. Optimizes against F_true → cherry-picks "favorable" outcomes, overshoots later
+  2. Original implementation drew q2 candidates from pre-q1 top-K, missing chain continuation; degenerated to breadth-first querying
+- **Variance reduction version** (no F_true cheat): essentially indistinguishable from fwd-merge at 3000 trials (Δ = -0.011, -0.7σ). The 2-step horizon is too short to see the value of chain completion (D=40 steps to terminal).
+
+**Lesson**: The heuristic `reach × var` has a useful structural bias toward L0 queries that the exact 2-step optimization loses. The lookahead "correctly" identifies that deep queries give better immediate MSE, but those deep queries don't build merge infrastructure.
+
+### End-to-end RL (2026-04-09, D=8)
+
+Trained a permutation-symmetric MLP with PPO on 10 cloud instances for 1.7 hours each:
+- Per-node features: layer, is_queried, reach, value, prop_factor, var_next, valid_action
+- Within-layer mean pool → per-layer summary → global context (permutation-invariant)
+- Per-step reward: -(est - F_true)²; total return = -cumulative MSE
+
+**Two-phase approach** (imitation learning + RL fine-tuning):
+- Phase 1: Imitation — train policy to mimic fwd-merge via cross-entropy. Reaches ratio 0.999 (vs fwd-merge 0.978) — close but not quite matching.
+- Phase 2: PPO fine-tuning. Drifts UP from imitation baseline (ratios 0.97 → 1.03 → 1.01).
+- Conclusion: RL signal too noisy to find improvements over imitation policy.
+
+### ES optimization of parameterized strategy (2026-04-10)
+
+Designed a 10-parameter strategy family extending fwd-merge with tunable deviations:
+- `a, b`: score = prop_factor^a × var_next^b
+- `threshold`: deviation threshold
+- `chain_bonus`: extra bonus when fwd-merge is mid-chain (only for chain continuation)
+- `slope, progress_pow`: threshold = base + slope × progress^pow
+- `depth_pen, jump_pen`: extra threshold for deep / non-L0 deviations
+- `n_warmup`: complete N traces before allowing deviations
+- `reach_min`: minimum reach to consider deviation
+
+Ran simple ES on 10 instances × 200 generations × 500 evaluation episodes:
+- 5 runs converged to small improvements (Δ ≈ -0.0003)
+- 3 runs found "promising" configs at Δ ≈ -0.009 (10x larger improvement)
+- **Validated best config (rl9) on 10k paired trials**: Δ = +0.0009 ± 0.0024 (+0.4σ)
+- The -0.009 was **overfitting to the 500 evaluation episodes**
+
+**Best ES-found "winning" params** (overfit, doesn't actually beat fwd-merge):
+- a=1.66, b=1.08, threshold=0.12, chain_bonus=0.0
+- slope=-0.84 (gets aggressive over time — opposite of earlier finding)
+- depth_pen=0.19, jump_pen=0.52, progress_pow=0.87
+
+### Final verdict
+
+After 178 heuristic configs + 137 scoring configs + exact 1-step + 2-step lookahead + end-to-end RL + ES optimization:
+
+**fwd-merge is optimal (or within ~0.0002) for funnel cones at D=8 and D=40.**
+**The conjecture violation (~9% above k for funnels at D=40) is geometric, not strategic.**
+
 ### Infrastructure notes
 
 - **ARC compute**: `c create`, `c ssh`, `c rsync`, `c delete` (alias for `python -m arc_infra.cli`)
@@ -233,22 +305,44 @@ Tested: "deviate from fwd-merge only if greedy score ≥ (1 + threshold) × fwd 
 ```
 run_cones.py              # Standalone runner — just needs numpy + numba
 cone_fast.py              # Full experiment harness with multiple strategies
-batch_runner.py           # Batch experiment runner with 12 heuristic types
+batch_runner.py           # Batch runner with 12 heuristic types (178 + 137 configs)
 linear_threshold.py       # Linear threshold with --baseline/--fwd-file support
 threshold_greedy.py       # Fixed threshold greedy
 compare_fwd_vs_greedy.py  # Paired comparison with decision classification
 deviation_analysis.py     # Counterfactual analysis of greedy deviations
 reached_weighted_fast.py  # Greedy strategy (reached-weighted with incremental DP)
+exact_greedy.py           # Exact 1-step variance reduction via prop_factor (fast)
+lookahead2.py             # 2-step lookahead with realized MSE (catastrophic)
+lookahead2_var.py         # 2-step lookahead with variance reduction (≈ fwd-merge)
+param_strategy.py         # 10-parameter strategy family (fwd-merge + tunable knobs)
+es_optimize.py            # Evolutionary strategy optimizer for param_strategy
+rl_cone.py                # End-to-end PPO (one-phase, didn't converge)
+rl_cone2.py               # Two-phase: imitation + PPO fine-tuning
 compare_probe.py          # Paired probe-first vs fwd-merge comparison
 adaptive_exact.py         # Adaptive strategy using exact variance reduction
 verify_cov_conditional.py # Conditional covariance formula verification
 COVARIANCE_DERIVATION.md  # Mathematical derivation of covariance formula
 ```
 
+### Key script: `exact_greedy.py`
+The fastest implementation of all the threshold-greedy variants. Uses prop_factor precomputation for O(1) per-candidate scoring. Supports `--score-a` for the reach exponent and `--schedule` for fixed/linear/switch/step thresholds. Run at ~0.6s/trial at D=40.
+
+### Key script: `param_strategy.py`
+The cleanest parameterized strategy family. Takes a `params` dict with all 10 knobs. Use this if you want to test new strategy ideas — just add a new parameter and update `compute_scores` or the threshold logic.
+
 ## Open questions
 
 1. **Does the ratio truly plateau, or slowly grow?** Data suggests plateau around 1.10-1.12, but error bars at large D are wider.
-2. **What about non-funnel cones?** Constant-width and widening cones behave differently.
+2. **What about non-funnel cones?** Constant-width and widening cones behave differently. **This is now the most promising direction** — given that fwd-merge is provably near-optimal on funnels, the only way to make the ratio < 1 is to find cone shapes where the violation doesn't occur.
 3. **Is there a closed-form for the asymptotic ratio?** The plateau value may be expressible in terms of the funnel geometry.
 4. **Can the bound be tightened?** If the conjecture bound of k is wrong, what is the correct constant? The data suggests ~1.12k for large funnels.
-5. **Is there a fundamentally different scoring function** (not reach × variance) that could predict beneficial deviations more accurately? The current greedy score is barely better than random at identifying good deviations.
+5. **Is the violation submodular-tight?** The cumulative MSE objective Σ Var(F|known_i) is approximately submodular. The greedy approximation factor for submodular minimization might explain the ~9% gap.
+6. **Do non-cone DAGs show worse violations?** The conjecture is about general DAGs. Cones might be mild counterexamples.
+
+## Validation gotchas (lessons learned)
+
+- **Always use ≥10k paired trials for the final comparison.** At 500-3000 trials, noise is ~0.005 — much larger than the real effects (~0.0002).
+- **Don't use F_true in scoring functions during search.** Even if you compute the gradient correctly, "optimizing" against F_true overfits to specific oracle realizations.
+- **ES with too few evaluation episodes overfits.** Our ES at 500 episodes/eval found "winners" at -0.009 that turned into +0.0009 at 10k.
+- **Stdout buffering on cloud:** use `python3 -u` for unbuffered output when running with nohup.
+- **Shell quoting:** negative numbers and decimals like `-0.5` get eaten by SSH command substitution. Wrap full commands in single quotes or use the value `0.0003` instead of `3e-4`.
